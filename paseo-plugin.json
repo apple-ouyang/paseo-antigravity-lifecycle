@@ -1,0 +1,7 @@
+{
+  "id": "antigravity-lifecycle",
+  "description": "Antigravity CLI (agy) lifecycle hook integration for Paseo: records PreInvocation, PostInvocation, and Stop (fullyIdle: true|false) into hook-state.json so ACP sessions hold turns open across background commands and subagents.",
+  "requirements": {
+    "paseo": ">=0.15.3"
+  }
+}
