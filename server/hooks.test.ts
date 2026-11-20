@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -76,11 +76,19 @@ test("ensureAntigravityHooksInstalled preserves sibling bundles and writes hook-
     };
 
     assert.equal(runEvent("PreInvocation"), "{}\n");
+    assert.equal(existsSync(path.join(logsDir, "hook-state.json")), false);
+    const procMeta = JSON.parse(readFileSync(path.join(logsDir, "process.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(procMeta.conversationId, "sid-123");
+    assert.equal(procMeta.event, "PreInvocation");
+    assert.equal(typeof procMeta.pid, "number");
+    assert.ok((procMeta.pid as number) > 1);
 
     assert.equal(runEvent("Stop", false), '{"decision":""}\n');
     let state = JSON.parse(readFileSync(path.join(logsDir, "hook-state.json"), "utf8")) as Record<string, unknown>;
     assert.equal(state.event, "Stop");
     assert.equal(state.fullyIdle, false);
+    assert.equal(typeof state.pid, "number");
+    assert.ok((state.pid as number) > 1);
 
     // PostInvocation fires right after Stop in Antigravity and must not clobber Stop's fullyIdle state.
     assert.equal(runEvent("PostInvocation"), "{}\n");

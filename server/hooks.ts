@@ -126,25 +126,43 @@ process.stdin.on("end", () => {
             "logs",
           )
         : null;
-    if (!logsDir || event !== "Stop") {
+    if (!logsDir || (event !== "PreInvocation" && event !== "Stop")) {
       return;
     }
     mkdirSync(logsDir, { recursive: true });
+    const now = Date.now();
+    const envPid = Number(process.env.PASEO_HOOK_AGENT_PID || "");
+    const pid = Number.isInteger(envPid) && envPid > 1 ? envPid : (typeof process.ppid === "number" && process.ppid > 1 ? process.ppid : null);
+    const writeJsonAtomic = (filename, data) => {
+      const target = path.join(logsDir, filename);
+      const tmp = \`\${target}.\${process.pid}.tmp\`;
+      writeFileSync(tmp, \`\${JSON.stringify(data)}\\n\`, "utf8");
+      try {
+        renameSync(tmp, target);
+      } catch (err) {
+        rmSync(tmp, { force: true });
+        throw err;
+      }
+    };
+    if (pid !== null) {
+      writeJsonAtomic("process.json", {
+        conversationId,
+        pid,
+        event,
+        ts: now,
+      });
+    }
+    if (event !== "Stop") {
+      return;
+    }
     const state = {
       conversationId,
       event: "Stop",
       fullyIdle: payload.fullyIdle === false ? false : true,
-      ts: Date.now(),
+      ...(pid !== null ? { pid } : {}),
+      ts: now,
     };
-    const target = path.join(logsDir, "hook-state.json");
-    const tmp = \`\${target}.\${process.pid}.tmp\`;
-    writeFileSync(tmp, \`\${JSON.stringify(state)}\\n\`, "utf8");
-    try {
-      renameSync(tmp, target);
-    } catch (err) {
-      rmSync(tmp, { force: true });
-      throw err;
-    }
+    writeJsonAtomic("hook-state.json", state);
   } catch {
     // Never fail an Antigravity lifecycle hook on state write errors.
   }
@@ -163,7 +181,7 @@ export function buildHookCommand(
   const quotedEvent = shellSingleQuote(event);
   const fallbackJson = event === "Stop" ? '{"decision":""}' : "{}";
   const quotedFallback = shellSingleQuote(fallbackJson);
-  const inner = `if [ -f ${quotedScript} ] && [ -r ${quotedScript} ]; then if [ -x ${quotedNode} ]; then ${quotedNode} ${quotedScript} ${quotedEvent}; else node ${quotedScript} ${quotedEvent}; fi; else printf '%s\\n' ${quotedFallback}; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi`;
+  const inner = `PASEO_HOOK_AGENT_PID="\${PPID:-}"; export PASEO_HOOK_AGENT_PID; if [ -f ${quotedScript} ] && [ -r ${quotedScript} ]; then if [ -x ${quotedNode} ]; then exec ${quotedNode} ${quotedScript} ${quotedEvent}; else exec node ${quotedScript} ${quotedEvent}; fi; else printf '%s\\n' ${quotedFallback}; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi`;
   return `/bin/sh -c ${shellSingleQuote(inner)}`;
 }
 
