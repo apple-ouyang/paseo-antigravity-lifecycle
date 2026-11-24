@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
 import type { AgentBgStatus, SubagentItem, SwarmMember } from "../shared/rpc.ts";
@@ -8,6 +8,8 @@ import {
   getStatusSnapshot,
   openConsoleForAgent,
   refreshAgentStatus,
+  resolveCoordinatorChildFromStatus,
+  sendSwarmMessage,
   subscribeStatus,
   type SelectedChildTarget,
 } from "./store.ts";
@@ -49,13 +51,33 @@ function stateLabelAndColor(
   }
 }
 
+function coordinatorStateMeta(
+  state: AgentBgStatus["coordinatorState"],
+  theme: PluginTheme,
+): { label: string; color: string } {
+  switch (state) {
+    case "wakeup_running":
+      return { label: "运行中", color: theme.colors.accent };
+    case "swarm_wait":
+      return { label: "等唤醒", color: theme.colors.statusWarning };
+    case "background_hold":
+      return { label: "协调中", color: theme.colors.accent };
+    case "stopped":
+      return { label: "已停止", color: theme.colors.foregroundMuted };
+    case "idle":
+      return { label: "空闲", color: theme.colors.statusSuccess };
+  }
+}
+
 function StatusContent({
+  agentId,
   status,
   theme,
   onOpenConsole,
   onOpenChild,
   onOpenBoardForMember,
 }: {
+  agentId: string;
   status: AgentBgStatus;
   theme: PluginTheme;
   onOpenConsole: () => void;
@@ -64,6 +86,31 @@ function StatusContent({
 }) {
   const [showCompleted, setShowCompleted] = useState(false);
   const [showDoneSteps, setShowDoneSteps] = useState(false);
+  const [coordMsg, setCoordMsg] = useState("");
+  const [coordSending, setCoordSending] = useState(false);
+  const [coordFeedback, setCoordFeedback] = useState<string | null>(null);
+
+  const coordTarget = resolveCoordinatorChildFromStatus(status);
+  const coordBadge = coordinatorStateMeta(status.coordinatorState, theme);
+
+  const handleSendToCoordinator = async () => {
+    const trimmed = coordMsg.trim();
+    if (!trimmed || coordSending) return;
+    setCoordSending(true);
+    setCoordFeedback(null);
+    const res = await sendSwarmMessage(agentId, trimmed, "coordinator");
+    setCoordSending(false);
+    if (res.ok) {
+      setCoordMsg("");
+      setCoordFeedback(
+        res.method === "agentapi"
+          ? "✓ 已直达 @coordinator（未打断运行中的进程）"
+          : "✓ 已发送给 @coordinator",
+      );
+    } else {
+      setCoordFeedback(`发送失败：${res.error ?? "未知错误"}`);
+    }
+  };
 
   const allMembers = (status.swarm?.members ?? []).filter((m) => !ROLE_WORKER_RE.test(m.name));
   const liveMembers = allMembers.filter((m) => !isMemberDone(m));
@@ -151,6 +198,122 @@ function StatusContent({
       <ScrollView style={{ maxHeight: 460 }} contentContainerStyle={{ gap: 10 }}>
         {/* 1. Real-time percentage progress bar + elapsed + ETA */}
         {status.progress ? <ProgressMeter progress={status.progress} theme={theme} compact /> : null}
+
+        {/* 1.5 Coordinator entry pinned at the top of the menu for 1-click chat & non-interrupting message */}
+        {coordTarget ? (
+          <View
+            style={{
+              gap: 6,
+              backgroundColor: theme.colors.surface1,
+              borderColor: theme.colors.accent,
+              borderWidth: 1,
+              borderRadius: 8,
+              padding: 9,
+            }}
+          >
+            <Pressable
+              onPress={() => onOpenChild(coordTarget)}
+              style={{ gap: 2 }}
+            >
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "700" }} numberOfLines={1}>
+                    @coordinator
+                  </Text>
+                  <View
+                    style={{
+                      backgroundColor: theme.colors.surface2,
+                      borderColor: theme.colors.border,
+                      borderWidth: 1,
+                      borderRadius: 4,
+                      paddingHorizontal: 5,
+                      paddingVertical: 1,
+                    }}
+                  >
+                    <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "700" }}>
+                      协调者
+                    </Text>
+                  </View>
+                  {status.coordinator?.stepCount ? (
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+                      {status.coordinator.stepCount} 步
+                    </Text>
+                  ) : null}
+                </View>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                  <Text style={{ color: coordBadge.color, fontSize: 11, fontWeight: "600" }}>
+                    {coordBadge.label}
+                  </Text>
+                  <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
+                    对话 ›
+                  </Text>
+                </View>
+              </View>
+              {status.coordinator?.lastActivity ? (
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
+                  {status.coordinator.lastActivity}
+                </Text>
+              ) : null}
+            </Pressable>
+
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <TextInput
+                value={coordMsg}
+                onChangeText={setCoordMsg}
+                placeholder="发给协调者（不打断运行中的进程）…"
+                placeholderTextColor={theme.colors.foregroundMuted}
+                onSubmitEditing={() => void handleSendToCoordinator()}
+                style={{
+                  flex: 1,
+                  backgroundColor: theme.colors.surface0,
+                  borderColor: theme.colors.border,
+                  borderWidth: 1,
+                  borderRadius: 6,
+                  paddingHorizontal: 8,
+                  paddingVertical: 5,
+                  color: theme.colors.foreground,
+                  fontSize: 11,
+                }}
+              />
+              <Pressable
+                disabled={coordSending || !coordMsg.trim()}
+                onPress={() => void handleSendToCoordinator()}
+                style={{
+                  backgroundColor:
+                    coordSending || !coordMsg.trim() ? theme.colors.surface2 : theme.colors.accent,
+                  borderRadius: 6,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      coordSending || !coordMsg.trim()
+                        ? theme.colors.foregroundMuted
+                        : theme.colors.accentForeground,
+                    fontSize: 11,
+                    fontWeight: "600",
+                  }}
+                >
+                  {coordSending ? "发送中" : "发送"}
+                </Text>
+              </Pressable>
+            </View>
+            {coordFeedback ? (
+              <Text
+                style={{
+                  color: coordFeedback.startsWith("✓")
+                    ? theme.colors.statusSuccess
+                    : theme.colors.statusWarning,
+                  fontSize: 10,
+                }}
+              >
+                {coordFeedback}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
 
         {/* 2. Task checklist right at the top inside the chat dialog popover! */}
         {plan && plan.total > 0 ? (
@@ -498,6 +661,7 @@ export function AgyLifecyclePopover(props: PluginButtonContentProps) {
   }
   return (
     <StatusContent
+      agentId={agentId}
       status={status}
       theme={props.theme}
       onOpenConsole={handleOpenConsole}

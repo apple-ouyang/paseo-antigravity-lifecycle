@@ -14,6 +14,7 @@ import {
   replaceAllStatuses,
   setOpenConsoleHandler,
   setRefreshAgentStatusHandler,
+  setSendSwarmMessageHandler,
   subscribeStatus,
   unregisterAgentWorkspace,
   upsertAgentStatus,
@@ -24,7 +25,12 @@ import {
   transformAgyOtherToolCall,
   transformAgyQuestionFallback,
 } from "./client/timeline-transformer.ts";
-import { agyLifecycleGet, agyLifecycleWatch, type AgentBgStatus } from "./shared/rpc.ts";
+import {
+  agyLifecycleGet,
+  agyLifecycleWatch,
+  agySwarmSendMessage,
+  type AgentBgStatus,
+} from "./shared/rpc.ts";
 import { AgyToolCardSchema } from "./shared/timeline.ts";
 
 interface PillEntry {
@@ -255,6 +261,9 @@ export default function contribute(client: PluginClientContext) {
     return req;
   };
   setRefreshAgentStatusHandler((agentId) => refreshAgent(agentId));
+  setSendSwarmMessageHandler((agentId, text, targetMember) =>
+    client.rpc(agySwarmSendMessage, { agentId, text, targetMember }),
+  );
 
   const startWatch = () => {
     if (disposed) return;
@@ -413,6 +422,7 @@ export default function contribute(client: PluginClientContext) {
     unsubStatusPills();
     setOpenConsoleHandler(null);
     setRefreshAgentStatusHandler(null);
+    setSendSwarmMessageHandler(null);
     for (const agentId of [...pills.keys()]) remove(agentId);
     clearAllStatuses();
     await disposePanel?.();

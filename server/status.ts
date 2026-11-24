@@ -1765,6 +1765,8 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     summaryLine = "当前无活动后台任务";
   }
 
+  const coordinatorRecent = summarizeRecentActivity(rows);
+
   return {
     agentId,
     sessionId,
@@ -1777,6 +1779,12 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     hasConsoleData,
     progress,
     coordinatorState,
+    coordinator: {
+      conversationId: sessionId,
+      model: coordinatorRecent.model,
+      lastActivity: coordinatorRecent.lastActivity,
+      stepCount: rows.length,
+    },
     pillLabel,
     summaryLine,
     swarm,

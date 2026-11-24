@@ -10,7 +10,6 @@ import {
 } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import {
-  usePaseo,
   useRpc,
   type PluginAgentPanelProps,
 } from "@getpaseo/plugin/client";
@@ -18,6 +17,7 @@ import {
   agyChildStepDetailGet,
   agyChildTranscriptGet,
   agyConsoleGet,
+  agySwarmSendMessage,
   type AgyConsoleDetail,
   type AgyMode,
   type ChildStepDetail,
@@ -40,6 +40,7 @@ import {
   getConsoleDetailCache,
   getConsoleNavRequest,
   getStatusSnapshot,
+  resolveCoordinatorChildFromStatus,
   resolveMemberChildFromStatus,
   resolveSubagentChildFromStatus,
   setChildStepDetailCache,
@@ -1172,10 +1173,10 @@ function ChildStepRow({
 export function AgyConsolePanel(props: PluginAgentPanelProps) {
   const { theme } = props;
   const agentId = props.params?.agentId ?? props.agentId;
-  const paseo = usePaseo();
   const fetchConsole = useRpc(agyConsoleGet);
   const fetchChildTranscript = useRpc(agyChildTranscriptGet);
   const fetchChildStepDetail = useRpc(agyChildStepDetailGet);
+  const sendSwarmMsg = useRpc(agySwarmSendMessage);
 
   const liveStatus = useSyncExternalStore(
     subscribeStatus,
@@ -1212,6 +1213,9 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   const [composeText, setComposeText] = useState("");
   const [sending, setSending] = useState(false);
   const [sendFeedback, setSendFeedback] = useState<string | null>(null);
+  const [overviewCoordText, setOverviewCoordText] = useState("");
+  const [overviewCoordSending, setOverviewCoordSending] = useState(false);
+  const [overviewCoordFeedback, setOverviewCoordFeedback] = useState<string | null>(null);
   const boardScrollRef = useRef<ScrollView | null>(null);
   const boardPinnedRef = useRef(true);
   const [boardScrolledAway, setBoardScrolledAway] = useState(false);
@@ -1648,6 +1652,16 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     return { all, active, completed };
   }, [teamwork, subagents]);
 
+  const coordinatorTarget = useMemo(
+    () => resolveCoordinatorChildFromStatus(status ?? null),
+    [status],
+  );
+
+  const openCoordinatorLog = () => {
+    if (!coordinatorTarget) return;
+    selectChild(coordinatorTarget);
+  };
+
   const openMemberLog = (member: SwarmMember) => {
     if (!member.conversationId) return;
     selectChild({
@@ -1677,14 +1691,54 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     setChildSending(true);
     setChildSendFeedback(null);
     try {
-      const prompt = `请在 Swarm 消息板上转达给 @${memberName}：\n${body}`;
-      await paseo.agents.ref(agentId).send(prompt);
-      setChildReplyText("");
-      setChildSendFeedback(`已通过协调者转达给 @${memberName}`);
+      const res = await sendSwarmMsg({
+        agentId,
+        text: body,
+        targetMember: memberName,
+      });
+      if (res.ok) {
+        setChildReplyText("");
+        const suffix = res.method === "agentapi" ? "（未打断运行中的进程）" : "";
+        setChildSendFeedback(
+          memberName === "coordinator"
+            ? `✓ 已直达 @coordinator${suffix}`
+            : `✓ 已发给 @coordinator 转达给 @${memberName}${suffix}`,
+        );
+      } else {
+        setChildSendFeedback(`发送失败：${res.error ?? "未知错误"}`);
+      }
     } catch (err) {
       setChildSendFeedback(`发送失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setChildSending(false);
+    }
+  };
+
+  const handleSendOverviewCoordinator = async () => {
+    const body = overviewCoordText.trim();
+    if (!body || overviewCoordSending) return;
+    setOverviewCoordSending(true);
+    setOverviewCoordFeedback(null);
+    try {
+      const res = await sendSwarmMsg({
+        agentId,
+        text: body,
+        targetMember: "coordinator",
+      });
+      if (res.ok) {
+        setOverviewCoordText("");
+        setOverviewCoordFeedback(
+          res.method === "agentapi"
+            ? "✓ 已直达 @coordinator（未打断运行中的 Swarm 成员）"
+            : "✓ 已发送给 @coordinator",
+        );
+      } else {
+        setOverviewCoordFeedback(`发送失败：${res.error ?? "未知错误"}`);
+      }
+    } catch (err) {
+      setOverviewCoordFeedback(`发送失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setOverviewCoordSending(false);
     }
   };
 
@@ -1694,13 +1748,22 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     setSending(true);
     setSendFeedback(null);
     try {
-      const prompt =
-        composeTarget === "coordinator"
-          ? body
-          : `请在 Swarm 消息板上转达给 @${composeTarget}：\n${body}`;
-      await paseo.agents.ref(agentId).send(prompt);
-      setComposeText("");
-      setSendFeedback(`已发送给协调者${composeTarget !== "coordinator" ? `（转 @${composeTarget}）` : ""}`);
+      const res = await sendSwarmMsg({
+        agentId,
+        text: body,
+        targetMember: composeTarget,
+      });
+      if (res.ok) {
+        setComposeText("");
+        const suffix = res.method === "agentapi" ? "（未打断运行中的进程）" : "";
+        setSendFeedback(
+          composeTarget === "coordinator"
+            ? `✓ 已直达 @coordinator${suffix}`
+            : `✓ 已发给 @coordinator 转达给 @${composeTarget}${suffix}`,
+        );
+      } else {
+        setSendFeedback(`发送失败：${res.error ?? "未知错误"}`);
+      }
     } catch (err) {
       setSendFeedback(`发送失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -1821,8 +1884,17 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
               .join(" · ")}
           </Text>
 
-          {quickSwitchMembers.length > 1 ? (
+          {coordinatorTarget || quickSwitchMembers.length > 0 ? (
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingTop: 2 }}>
+              {coordinatorTarget ? (
+                <Chip
+                  label="@coordinator"
+                  color={theme.colors.accent}
+                  active={selectedChild.conversationId === coordinatorTarget.conversationId}
+                  theme={theme}
+                  onPress={openCoordinatorLog}
+                />
+              ) : null}
               {quickSwitchMembers.map((m) => (
                 <Chip
                   key={m.name}
@@ -1927,8 +1999,13 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
               <TextInput
                 value={childReplyText}
                 onChangeText={setChildReplyText}
-                placeholder={`给 @${selectedChild.memberName} 发指令（经协调者转达）…`}
+                placeholder={
+                  selectedChild.memberName === "coordinator"
+                    ? "给 @coordinator 发消息（直达协调者，不打断运行中的进程）…"
+                    : `给 @${selectedChild.memberName} 发指令（经协调者转达，不打断运行中的进程）…`
+                }
                 placeholderTextColor={theme.colors.foregroundMuted}
+                onSubmitEditing={() => void handleSendToChildMember()}
                 style={{
                   flex: 1,
                   backgroundColor: theme.colors.surface0,
@@ -2138,6 +2215,144 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 10 }}>
           {/* 0. Real-time percentage progress bar + elapsed + ETA */}
           {status.progress ? <ProgressMeter progress={status.progress} theme={theme} /> : null}
+
+          {/* 0.25 Coordinator card pinned at the top of Overview home for 1-click chat & non-interrupting messaging */}
+          {coordinatorTarget ? (
+            <View
+              style={{
+                backgroundColor: theme.colors.surface1,
+                borderColor: theme.colors.accent,
+                borderWidth: 1,
+                borderRadius: 10,
+                padding: 11,
+                gap: 8,
+              }}
+            >
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <Pressable onPress={openCoordinatorLog} style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "700" }}>
+                      @coordinator
+                    </Text>
+                    <View
+                      style={{
+                        backgroundColor: theme.colors.surface2,
+                        borderColor: theme.colors.border,
+                        borderWidth: 1,
+                        borderRadius: 4,
+                        paddingHorizontal: 5,
+                        paddingVertical: 1,
+                      }}
+                    >
+                      <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "700" }}>
+                        协调者
+                      </Text>
+                    </View>
+                    <Text
+                      style={{
+                        color:
+                          status.coordinatorState === "wakeup_running" ||
+                          status.coordinatorState === "background_hold"
+                            ? theme.colors.accent
+                            : status.coordinatorState === "swarm_wait"
+                              ? theme.colors.statusWarning
+                              : status.coordinatorState === "idle"
+                                ? theme.colors.statusSuccess
+                                : theme.colors.foregroundMuted,
+                        fontSize: 11,
+                        fontWeight: "600",
+                      }}
+                    >
+                      {status.coordinatorState === "wakeup_running"
+                        ? "运行中"
+                        : status.coordinatorState === "swarm_wait"
+                          ? "等待唤醒"
+                          : status.coordinatorState === "background_hold"
+                            ? "后台协调中"
+                            : status.coordinatorState === "stopped"
+                              ? "已停止"
+                              : "空闲"}
+                    </Text>
+                    {status.coordinator?.stepCount ? (
+                      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                        · {status.coordinator.stepCount} 步
+                      </Text>
+                    ) : null}
+                  </View>
+                  {status.coordinator?.lastActivity ? (
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={1}>
+                      {status.coordinator.lastActivity}
+                    </Text>
+                  ) : null}
+                </Pressable>
+                <Chip
+                  label="查看对话 →"
+                  color={theme.colors.accent}
+                  theme={theme}
+                  onPress={openCoordinatorLog}
+                />
+              </View>
+
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <TextInput
+                  value={overviewCoordText}
+                  onChangeText={setOverviewCoordText}
+                  placeholder="给 @coordinator 发消息（直达协调者，不打断运行中的 Swarm 成员）…"
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  onSubmitEditing={() => void handleSendOverviewCoordinator()}
+                  style={{
+                    flex: 1,
+                    backgroundColor: theme.colors.surface0,
+                    borderColor: theme.colors.border,
+                    borderWidth: 1,
+                    borderRadius: 7,
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    color: theme.colors.foreground,
+                    fontSize: 12,
+                  }}
+                />
+                <Pressable
+                  disabled={overviewCoordSending || !overviewCoordText.trim()}
+                  onPress={() => void handleSendOverviewCoordinator()}
+                  style={{
+                    backgroundColor:
+                      overviewCoordSending || !overviewCoordText.trim()
+                        ? theme.colors.surface2
+                        : theme.colors.accent,
+                    borderRadius: 7,
+                    paddingHorizontal: 12,
+                    paddingVertical: 7,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        overviewCoordSending || !overviewCoordText.trim()
+                          ? theme.colors.foregroundMuted
+                          : theme.colors.accentForeground,
+                      fontSize: 12,
+                      fontWeight: "600",
+                    }}
+                  >
+                    {overviewCoordSending ? "发送中" : "发送"}
+                  </Text>
+                </Pressable>
+              </View>
+              {overviewCoordFeedback ? (
+                <Text
+                  style={{
+                    color: overviewCoordFeedback.startsWith("✓")
+                      ? theme.colors.statusSuccess
+                      : theme.colors.statusWarning,
+                    fontSize: 11,
+                  }}
+                >
+                  {overviewCoordFeedback}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
 
           {/* 0.5 Task checklist pinned right at the top */}
           {plan ? (
@@ -2550,6 +2765,41 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             />
           </View>
           <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 10 }}>
+            {coordinatorTarget ? (
+              <SectionCard title="协调者 (Coordinator)" right="点击查看对话 / 发消息" theme={theme}>
+                <Pressable
+                  onPress={openCoordinatorLog}
+                  style={{
+                    backgroundColor: theme.colors.surface2,
+                    borderColor: theme.colors.accent,
+                    borderWidth: 1,
+                    borderRadius: 8,
+                    padding: 10,
+                    gap: 4,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "700" }}>
+                      @coordinator（协调者）
+                    </Text>
+                    <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
+                      对话 / 发消息 ›
+                    </Text>
+                  </View>
+                  {status.coordinator?.lastActivity ? (
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={2}>
+                      {status.coordinator.lastActivity}
+                    </Text>
+                  ) : null}
+                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+                    {[status.coordinator?.model, status.coordinator?.stepCount ? `${status.coordinator.stepCount} 步` : null]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </Text>
+                </Pressable>
+              </SectionCard>
+            ) : null}
+
             {visibleActiveMembers.length > 0 ? (
               <SectionCard title="活跃中 (Active)" right={`${visibleActiveMembers.length}`} theme={theme}>
                 {visibleActiveMembers.map((m) => (
@@ -2734,8 +2984,8 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                 onChangeText={setComposeText}
                 placeholder={
                   composeTarget === "coordinator"
-                    ? "给协调者发指令…"
-                    : `让协调者转达给 @${composeTarget}…`
+                    ? "给协调者发指令（不打断运行中的进程）…"
+                    : `让协调者转达给 @${composeTarget}（不打断运行中的进程）…`
                 }
                 placeholderTextColor={theme.colors.foregroundMuted}
                 style={{

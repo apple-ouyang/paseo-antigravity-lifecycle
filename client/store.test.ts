@@ -12,10 +12,13 @@ import {
   refreshAgentStatus,
   registerAgentWorkspace,
   replaceAllStatuses,
+  resolveCoordinatorChildFromStatus,
   resolveMemberChildFromStatus,
   resolveSubagentChildFromStatus,
+  sendSwarmMessage,
   setOpenConsoleHandler,
   setRefreshAgentStatusHandler,
+  setSendSwarmMessageHandler,
   subscribeConsoleNav,
   subscribeStatus,
   unregisterAgentWorkspace,
@@ -275,5 +278,48 @@ test("upsertAgentStatus and refreshAgentStatus heal stale snapshots without clob
     unsub();
     setRefreshAgentStatusHandler(null);
     clearAllStatuses();
+  }
+});
+
+test("resolveCoordinatorChildFromStatus and sendSwarmMessage target @coordinator cleanly", async () => {
+  const status = {
+    agentId: "a-coord",
+    sessionId: "sess-coord-123",
+    backgroundActive: true,
+    goalActive: false,
+    coordinatorState: "swarm_wait" as const,
+    coordinator: {
+      conversationId: "sess-coord-123",
+      model: "gemini-4-neon-high",
+      lastActivity: "等待消息板唤醒",
+      stepCount: 86,
+    },
+    pillLabel: "Swarm",
+    summaryLine: "Swarm",
+    swarm: null,
+    subagents: [],
+    tasks: [],
+    observedAt: Date.now(),
+  };
+
+  const coord = resolveCoordinatorChildFromStatus(status);
+  assert.ok(coord);
+  assert.equal(coord.conversationId, "sess-coord-123");
+  assert.equal(coord.memberName, "coordinator");
+  assert.equal(coord.isCoordinator, true);
+  assert.equal(coord.subtitle, "gemini-4-neon-high");
+
+  const sent: Array<{ agentId: string; text: string; targetMember?: string }> = [];
+  setSendSwarmMessageHandler(async (agentId, text, targetMember) => {
+    sent.push({ agentId, text, targetMember });
+    return { ok: true, method: "agentapi" };
+  });
+  try {
+    const res = await sendSwarmMessage("a-coord", "11篇论文已拆完", "coordinator");
+    assert.equal(res.ok, true);
+    assert.equal(res.method, "agentapi");
+    assert.deepEqual(sent, [{ agentId: "a-coord", text: "11篇论文已拆完", targetMember: "coordinator" }]);
+  } finally {
+    setSendSwarmMessageHandler(null);
   }
 });

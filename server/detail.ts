@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type {
   AgyConsoleDetail,
   ChildStepDetail,
@@ -1044,4 +1046,72 @@ export function collectAllowedChildIds(status: NonNullable<ReturnType<typeof ins
     if (s.id) allowed.add(s.id);
   }
   return allowed;
+}
+
+const execFileAsync = promisify(execFile);
+
+export function resolveAgyBinaryPath(homeDir = homedir()): string {
+  const envExe = process.env.ANTIGRAVITY_AGENTAPI_EXE?.trim();
+  if (envExe && existsSync(envExe)) return envExe;
+  const localBin = path.join(homeDir, ".local", "bin", "agy");
+  if (existsSync(localBin)) return localBin;
+  return "agy";
+}
+
+export function formatCoordinatorMessagePayload(
+  text: string,
+  targetMember?: string,
+): { title: string; body: string } {
+  const trimmed = text.trim();
+  const normalizedTarget = targetMember?.trim();
+  if (!normalizedTarget || normalizedTarget === "coordinator") {
+    return {
+      title: "来自用户的协调指令",
+      body: `[用户发给 @coordinator 的消息（非中断直达，请勿停止正在运行的 Swarm 成员）]\n${trimmed}`,
+    };
+  }
+  return {
+    title: `来自用户的指令（转 @${normalizedTarget}）`,
+    body: `[用户发给 @coordinator 的消息（请通过消息板转达给 @${normalizedTarget}，请勿中断正在运行的 Swarm 成员）]\n${trimmed}`,
+  };
+}
+
+export async function sendCoordinatorMessageViaAgentApi(input: {
+  sessionId: string;
+  text: string;
+  targetMember?: string;
+  homeDir?: string;
+  runner?: (
+    file: string,
+    args: string[],
+    options: { timeout: number; maxBuffer: number },
+  ) => Promise<{ stdout: string; stderr: string }>;
+}): Promise<{ ok: boolean; error?: string }> {
+  const { sessionId, text, targetMember } = input;
+  if (!sessionId || sessionId.includes("/") || sessionId.includes("..")) {
+    return { ok: false, error: "Invalid coordinator sessionId" };
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { ok: false, error: "Message text is empty" };
+  }
+  const { title, body } = formatCoordinatorMessagePayload(trimmed, targetMember);
+  const agyBin = resolveAgyBinaryPath(input.homeDir);
+  const args = ["agentapi", "send-message", `--title=${title}`, sessionId, body];
+  const run =
+    input.runner ??
+    ((file, argv, opts) => execFileAsync(file, argv, { ...opts, encoding: "utf8" }));
+
+  try {
+    await run(agyBin, args, { timeout: 15_000, maxBuffer: 1024 * 1024 });
+    return { ok: true };
+  } catch (err: unknown) {
+    const msg =
+      err && typeof err === "object" && "stderr" in err && typeof (err as { stderr?: unknown }).stderr === "string" && (err as { stderr: string }).stderr.trim()
+        ? (err as { stderr: string }).stderr.trim()
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    return { ok: false, error: msg };
+  }
 }

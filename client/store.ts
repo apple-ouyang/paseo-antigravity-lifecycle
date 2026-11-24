@@ -15,6 +15,13 @@ export interface SelectedChildTarget {
   running: boolean;
   workspace: string | null;
   memberName?: string | null;
+  isCoordinator?: boolean;
+}
+
+export interface SwarmSendResult {
+  ok: boolean;
+  method: "agentapi" | "paseo_send";
+  error?: string;
 }
 
 export interface ChildTranscriptCacheEntry {
@@ -33,6 +40,24 @@ export type ConsoleNavTarget =
   | { kind: "child"; child: SelectedChildTarget }
   | { kind: "member_by_name"; memberName: string }
   | { kind: "subagent_by_ref"; id?: string | null; role?: string | null };
+
+export function resolveCoordinatorChildFromStatus(
+  status: AgentBgStatus | null,
+): SelectedChildTarget | null {
+  const convId = status?.coordinator?.conversationId ?? status?.sessionId ?? "";
+  if (!status || !convId) return null;
+  return {
+    conversationId: convId,
+    label: "@coordinator（协调者）",
+    subtitle: status.coordinator?.model ?? "协调者",
+    running:
+      status.coordinatorState === "wakeup_running" ||
+      status.coordinatorState === "background_hold",
+    workspace: null,
+    memberName: "coordinator",
+    isCoordinator: true,
+  };
+}
 
 export function resolveMemberChildFromStatus(
   status: AgentBgStatus | null,
@@ -93,6 +118,9 @@ let statuses: Record<string, AgentBgStatus> = {};
 const agentWorkspaces = new Map<string, string>();
 let openPanelCallback: ((agentId: string, workspaceId: string) => void) | null = null;
 let refreshAgentStatusCallback: ((agentId: string) => Promise<AgentBgStatus | null>) | null = null;
+let sendSwarmMessageCallback:
+  | ((agentId: string, text: string, targetMember?: string) => Promise<SwarmSendResult>)
+  | null = null;
 const listeners = new Set<() => void>();
 
 let navSeq = 0;
@@ -239,6 +267,36 @@ export async function refreshAgentStatus(agentId: string): Promise<AgentBgStatus
     return await refreshAgentStatusCallback(agentId);
   } catch {
     return null;
+  }
+}
+
+export function setSendSwarmMessageHandler(
+  handler:
+    | ((agentId: string, text: string, targetMember?: string) => Promise<SwarmSendResult>)
+    | null,
+): void {
+  sendSwarmMessageCallback = handler;
+}
+
+export async function sendSwarmMessage(
+  agentId: string,
+  text: string,
+  targetMember?: string,
+): Promise<SwarmSendResult> {
+  if (!agentId || !text.trim()) {
+    return { ok: false, method: "agentapi", error: "消息内容为空" };
+  }
+  if (!sendSwarmMessageCallback) {
+    return { ok: false, method: "agentapi", error: "发送通道尚未就绪" };
+  }
+  try {
+    return await sendSwarmMessageCallback(agentId, text.trim(), targetMember);
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      method: "agentapi",
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 

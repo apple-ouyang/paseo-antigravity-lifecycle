@@ -245,6 +245,15 @@ export const AgentBgStatusSchema = z.object({
     "background_hold",
     "stopped",
   ]),
+  coordinator: z
+    .object({
+      conversationId: z.string(),
+      model: z.string().nullable(),
+      lastActivity: z.string().nullable(),
+      stepCount: z.number().int(),
+    })
+    .nullable()
+    .optional(),
   pillLabel: z.string(),
   summaryLine: z.string(),
   swarm: z
@@ -347,6 +356,20 @@ export const agyChildStepDetailGet = defineRpc({
     stepIndex: z.number().int().min(0),
   }),
   output: ChildStepDetailSchema.nullable(),
+});
+
+export const agySwarmSendMessage = defineRpc({
+  name: "antigravity-lifecycle.swarm.send",
+  input: z.object({
+    agentId: z.string().min(1),
+    text: z.string().min(1).max(16_000),
+    targetMember: z.string().min(1).max(64).optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    method: z.enum(["agentapi", "paseo_send"]),
+    error: z.string().optional(),
+  }),
 });
 
 export type ChildTranscriptResponse = NonNullable<

@@ -6,10 +6,12 @@ import test from "node:test";
 import {
   clearTranscriptCache,
   collectAllowedChildIds,
+  formatCoordinatorMessagePayload,
   inspectAgyConsole,
   readChildStepDetail,
   readChildTranscript,
   readSwarmBoard,
+  sendCoordinatorMessageViaAgentApi,
 } from "./detail.ts";
 import { inspectAgySession } from "./status.ts";
 
@@ -753,4 +755,36 @@ test("readChildStepDetail renders structured edit_file LCS diff, write_file line
   } finally {
     rmSync(homeDir, { recursive: true, force: true });
   }
+});
+
+test("sendCoordinatorMessageViaAgentApi delivers non-interrupting messages to coordinator via agentapi", async () => {
+  const calls: Array<{ file: string; args: string[] }> = [];
+  const res1 = await sendCoordinatorMessageViaAgentApi({
+    sessionId: "0abf5d68-0fb5-467e-b0ec-0bdf0441ff14",
+    text: "11篇论文已经拆分完毕，基于最新版改",
+    targetMember: "coordinator",
+    runner: async (file, args) => {
+      calls.push({ file, args });
+      return { stdout: "ok", stderr: "" };
+    },
+  });
+  assert.equal(res1.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.args[0], "agentapi");
+  assert.equal(calls[0]?.args[1], "send-message");
+  assert.equal(calls[0]?.args[3], "0abf5d68-0fb5-467e-b0ec-0bdf0441ff14");
+  assert.ok(calls[0]?.args[4]?.includes("11篇论文已经拆分完毕"));
+  assert.ok(calls[0]?.args[4]?.includes("@coordinator"));
+
+  const relayed = formatCoordinatorMessagePayload("先核对第3节", "s4-gamma-bridge");
+  assert.ok(relayed.title.includes("@s4-gamma-bridge"));
+  assert.ok(relayed.body.includes("@s4-gamma-bridge"));
+  assert.ok(relayed.body.includes("@coordinator"));
+
+  // Rejects path-traversal sessionIds
+  const bad = await sendCoordinatorMessageViaAgentApi({
+    sessionId: "../evil",
+    text: "hi",
+  });
+  assert.equal(bad.ok, false);
 });

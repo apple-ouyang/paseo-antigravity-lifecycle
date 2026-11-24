@@ -5,10 +5,12 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
   clearTranscriptCache,
   collectAllowedChildIds,
+  formatCoordinatorMessagePayload,
   inspectAgyConsole,
   readChildStepDetail,
   readChildTranscript,
   readSwarmBoard,
+  sendCoordinatorMessageViaAgentApi,
 } from "./server/detail.ts";
 import { ensureAntigravityHooksInstalled } from "./server/hooks.ts";
 import { clearStatusCaches, inspectAgySession } from "./server/status.ts";
@@ -19,6 +21,7 @@ import {
   agyConsoleGet,
   agyLifecycleGet,
   agyLifecycleWatch,
+  agySwarmSendMessage,
   type AgentBgStatus,
 } from "./shared/rpc.ts";
 
@@ -314,6 +317,57 @@ export default function contribute(server: PluginServerContext) {
     if (!status) return null;
     const allowed = collectAllowedChildIds(status);
     return readChildStepDetail(brainRoot, allowed, conversationId, stepIndex);
+  });
+
+  server.handle(agySwarmSendMessage, async ({ agentId, text, targetMember }, context) => {
+    const resolved = await resolveAgentAndSession(
+      context.paseo,
+      agentId,
+      refreshedAt,
+      inFlightRefresh,
+      knownSessions,
+    );
+    if (!resolved) {
+      return { ok: false, method: "agentapi" as const, error: "未找到对应的 Antigravity 协调者会话" };
+    }
+
+    // 1. Always try non-interrupting `agy agentapi send-message` to @coordinator first
+    // so running Swarm workers / subagents are NEVER force-cancelled by ACP `session/cancel`.
+    const viaAgentApi = await sendCoordinatorMessageViaAgentApi({
+      sessionId: resolved.sessionId,
+      text,
+      targetMember,
+    });
+    if (viaAgentApi.ok) {
+      return { ok: true, method: "agentapi" as const };
+    }
+
+    // 2. Only fall back to Paseo's normal send() when NO background Swarm/subagent work is running,
+    // because Paseo's send() interrupts an active foreground turn (`session/cancel`).
+    const status = inspectAgySession({
+      agentId: resolved.agentId,
+      sessionId: resolved.sessionId,
+      agentAlive: resolved.agentAlive,
+    });
+    if (status?.backgroundActive) {
+      return {
+        ok: false,
+        method: "agentapi" as const,
+        error: `非中断直达协调者失败（已阻止中断正在运行的 Swarm 成员）：${viaAgentApi.error ?? "unknown error"}`,
+      };
+    }
+
+    try {
+      const { body } = formatCoordinatorMessagePayload(text, targetMember);
+      await context.paseo.agents.ref(agentId).send(body);
+      return { ok: true, method: "paseo_send" as const };
+    } catch (error) {
+      return {
+        ok: false,
+        method: "paseo_send" as const,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   });
 
   server.handle(agyLifecycleWatch, (_input, context) => {
