@@ -1766,6 +1766,13 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
   }
 
   const coordinatorRecent = summarizeRecentActivity(rows);
+  let pendingInboxCount = 0;
+  try {
+    const inboxRaw = readFileSync(path.join(bdir, "logs", "paseo-inbox.jsonl"), "utf8");
+    pendingInboxCount = inboxRaw.split("\n").filter((line) => line.trim().length > 0).length;
+  } catch {
+    pendingInboxCount = 0;
+  }
 
   return {
     agentId,
@@ -1785,6 +1792,7 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
       lastActivity: coordinatorRecent.lastActivity,
       stepCount: rows.length,
     },
+    ...(pendingInboxCount > 0 ? { pendingInboxCount } : {}),
     pillLabel,
     summaryLine,
     swarm,

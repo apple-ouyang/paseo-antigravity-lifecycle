@@ -254,6 +254,7 @@ export const AgentBgStatusSchema = z.object({
     })
     .nullable()
     .optional(),
+  pendingInboxCount: z.number().int().optional(),
   pillLabel: z.string(),
   summaryLine: z.string(),
   swarm: z
@@ -358,12 +359,15 @@ export const agyChildStepDetailGet = defineRpc({
   output: ChildStepDetailSchema.nullable(),
 });
 
+export const SwarmSendModeSchema = z.enum(["queue", "interrupt"]);
+
 export const agySwarmSendMessage = defineRpc({
   name: "antigravity-lifecycle.swarm.send",
   input: z.object({
     agentId: z.string().min(1),
     text: z.string().min(1).max(16_000),
     targetMember: z.string().min(1).max(64).optional(),
+    mode: SwarmSendModeSchema.optional(),
   }),
   output: z.object({
     ok: z.boolean(),
@@ -372,6 +376,8 @@ export const agySwarmSendMessage = defineRpc({
     error: z.string().optional(),
   }),
 });
+
+export type SwarmSendMode = z.infer<typeof SwarmSendModeSchema>;
 
 export type ChildTranscriptResponse = NonNullable<
   z.infer<typeof agyChildTranscriptGet.output>

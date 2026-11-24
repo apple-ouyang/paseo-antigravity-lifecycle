@@ -3,6 +3,7 @@ import type {
   AgyConsoleDetail,
   ChildStepDetail,
   ChildTranscriptResponse,
+  SwarmSendMode,
   TranscriptStep,
 } from "../shared/rpc.ts";
 
@@ -120,7 +121,15 @@ const agentWorkspaces = new Map<string, string>();
 let openPanelCallback: ((agentId: string, workspaceId: string) => void) | null = null;
 let refreshAgentStatusCallback: ((agentId: string) => Promise<AgentBgStatus | null>) | null = null;
 let sendSwarmMessageCallback:
-  | ((agentId: string, text: string, targetMember?: string) => Promise<SwarmSendResult>)
+  | ((
+      agentId: string,
+      text: string,
+      targetMember?: string,
+      mode?: SwarmSendMode,
+    ) => Promise<SwarmSendResult>)
+  | null = null;
+let fetchConsoleCallback:
+  | ((agentId: string, boardLimit?: number) => Promise<AgyConsoleDetail | null>)
   | null = null;
 const listeners = new Set<() => void>();
 
@@ -273,7 +282,12 @@ export async function refreshAgentStatus(agentId: string): Promise<AgentBgStatus
 
 export function setSendSwarmMessageHandler(
   handler:
-    | ((agentId: string, text: string, targetMember?: string) => Promise<SwarmSendResult>)
+    | ((
+        agentId: string,
+        text: string,
+        targetMember?: string,
+        mode?: SwarmSendMode,
+      ) => Promise<SwarmSendResult>)
     | null,
 ): void {
   sendSwarmMessageCallback = handler;
@@ -283,21 +297,40 @@ export async function sendSwarmMessage(
   agentId: string,
   text: string,
   targetMember?: string,
+  mode?: SwarmSendMode,
 ): Promise<SwarmSendResult> {
   if (!agentId || !text.trim()) {
-    return { ok: false, method: "agentapi", error: "消息内容为空" };
+    return { ok: false, method: "hook_inbox", error: "消息内容为空" };
   }
   if (!sendSwarmMessageCallback) {
-    return { ok: false, method: "agentapi", error: "发送通道尚未就绪" };
+    return { ok: false, method: "hook_inbox", error: "发送通道尚未就绪" };
   }
   try {
-    return await sendSwarmMessageCallback(agentId, text.trim(), targetMember);
+    return await sendSwarmMessageCallback(agentId, text.trim(), targetMember, mode);
   } catch (err: unknown) {
     return {
       ok: false,
-      method: "agentapi",
+      method: "hook_inbox",
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+export function setFetchConsoleHandler(
+  handler: ((agentId: string, boardLimit?: number) => Promise<AgyConsoleDetail | null>) | null,
+): void {
+  fetchConsoleCallback = handler;
+}
+
+export async function fetchConsoleSnapshot(
+  agentId: string,
+  boardLimit = 10,
+): Promise<AgyConsoleDetail | null> {
+  if (!agentId || !fetchConsoleCallback) return null;
+  try {
+    return await fetchConsoleCallback(agentId, boardLimit);
+  } catch {
+    return null;
   }
 }
 

@@ -312,17 +312,29 @@ test("resolveCoordinatorChildFromStatus and sendSwarmMessage target @coordinator
   assert.equal(coord.isCoordinator, true);
   assert.equal(coord.subtitle, "gemini-4-neon-high");
 
-  const sent: Array<{ agentId: string; text: string; targetMember?: string }> = [];
-  setSendSwarmMessageHandler(async (agentId, text, targetMember) => {
-    sent.push({ agentId, text, targetMember });
-    return { ok: true, method: "hook_inbox", pendingCount: 1 };
+  const sent: Array<{ agentId: string; text: string; targetMember?: string; mode?: string }> = [];
+  setSendSwarmMessageHandler(async (agentId, text, targetMember, mode) => {
+    sent.push({ agentId, text, targetMember, mode });
+    return {
+      ok: true,
+      method: mode === "interrupt" ? "paseo_send" : "hook_inbox",
+      pendingCount: mode === "interrupt" ? undefined : 1,
+    };
   });
   try {
-    const res = await sendSwarmMessage("a-coord", "11篇论文已拆完", "coordinator");
+    const res = await sendSwarmMessage("a-coord", "11篇论文已拆完", "coordinator", "queue");
     assert.equal(res.ok, true);
     assert.equal(res.method, "hook_inbox");
     assert.equal(res.pendingCount, 1);
-    assert.deepEqual(sent, [{ agentId: "a-coord", text: "11篇论文已拆完", targetMember: "coordinator" }]);
+
+    const resInterrupt = await sendSwarmMessage("a-coord", "现在啥情况", "coordinator", "interrupt");
+    assert.equal(resInterrupt.ok, true);
+    assert.equal(resInterrupt.method, "paseo_send");
+
+    assert.deepEqual(sent, [
+      { agentId: "a-coord", text: "11篇论文已拆完", targetMember: "coordinator", mode: "queue" },
+      { agentId: "a-coord", text: "现在啥情况", targetMember: "coordinator", mode: "interrupt" },
+    ]);
   } finally {
     setSendSwarmMessageHandler(null);
   }

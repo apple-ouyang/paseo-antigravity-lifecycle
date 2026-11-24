@@ -320,7 +320,7 @@ export default function contribute(server: PluginServerContext) {
     return readChildStepDetail(brainRoot, allowed, conversationId, stepIndex);
   });
 
-  server.handle(agySwarmSendMessage, async ({ agentId, text, targetMember }, context) => {
+  server.handle(agySwarmSendMessage, async ({ agentId, text, targetMember, mode }, context) => {
     const resolved = await resolveAgentAndSession(
       context.paseo,
       agentId,
@@ -332,11 +332,33 @@ export default function contribute(server: PluginServerContext) {
       return { ok: false, method: "hook_inbox" as const, error: "未找到对应的 Antigravity 协调者会话" };
     }
 
+    const sendMode = mode ?? "queue";
+    const trimmed = text.trim();
+    const normalizedTarget = targetMember?.trim();
+
+    // 0. Explicit user opt-in: interrupt immediately to wake @coordinator right now.
+    if (sendMode === "interrupt") {
+      try {
+        const directBody =
+          !normalizedTarget || normalizedTarget === "coordinator"
+            ? trimmed
+            : `[请转达给 @${normalizedTarget}]\n${trimmed}`;
+        await context.paseo.agents.ref(agentId).send(directBody);
+        return { ok: true, method: "paseo_send" as const };
+      } catch (error) {
+        return {
+          ok: false,
+          method: "paseo_send" as const,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
     // 1. If the plugin environment already exposes AGY LS credentials, use instant out-of-band agentapi.
     if (process.env.ANTIGRAVITY_LS_ADDRESS?.trim() && process.env.ANTIGRAVITY_CSRF_TOKEN?.trim()) {
       const viaAgentApi = await sendCoordinatorMessageViaAgentApi({
         sessionId: resolved.sessionId,
-        text,
+        text: trimmed,
         targetMember,
       });
       if (viaAgentApi.ok) {
@@ -352,10 +374,9 @@ export default function contribute(server: PluginServerContext) {
     const currentAgent = context.paseo.agents.ref(agentId).current();
     const paseoRunning = currentAgent?.status === "running";
 
-    // 2. When background Swarm/subagents are active OR the Paseo turn is currently running,
-    // NEVER call Paseo's interrupting send() (`session/cancel` force-stops all Swarm workers!).
-    // Deliver via AGY's official lifecycle hook inbox (`PreInvocation`/`PostInvocation`/`Stop`
-    // injectSteps / continue), which injects directly into @coordinator without cancelling workers.
+    // 2. Default non-interrupting mode when background Swarm/subagents are active OR turn is running:
+    // deliver via AGY's official lifecycle hook inbox (`PreInvocation`/`PostInvocation`/`Stop`
+    // injectSteps / continue), so running Swarm workers are never force-cancelled.
     if (status?.backgroundActive || paseoRunning) {
       try {
         ensureAntigravityHooksInstalled();
@@ -367,7 +388,7 @@ export default function contribute(server: PluginServerContext) {
       const queued = enqueueCoordinatorHookInboxMessage({
         brainRoot,
         sessionId: resolved.sessionId,
-        text,
+        text: trimmed,
         targetMember,
       });
       if (queued.ok) {
@@ -386,7 +407,7 @@ export default function contribute(server: PluginServerContext) {
 
     // 3. Session is genuinely idle with no active background work -> start a normal turn cleanly.
     try {
-      const { body } = formatCoordinatorMessagePayload(text, targetMember);
+      const { body } = formatCoordinatorMessagePayload(trimmed, targetMember);
       await context.paseo.agents.ref(agentId).send(body);
       return { ok: true, method: "paseo_send" as const };
     } catch (error) {

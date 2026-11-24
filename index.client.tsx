@@ -12,6 +12,7 @@ import {
   getStatusSnapshot,
   registerAgentWorkspace,
   replaceAllStatuses,
+  setFetchConsoleHandler,
   setOpenConsoleHandler,
   setRefreshAgentStatusHandler,
   setSendSwarmMessageHandler,
@@ -26,6 +27,7 @@ import {
   transformAgyQuestionFallback,
 } from "./client/timeline-transformer.ts";
 import {
+  agyConsoleGet,
   agyLifecycleGet,
   agyLifecycleWatch,
   agySwarmSendMessage,
@@ -261,8 +263,11 @@ export default function contribute(client: PluginClientContext) {
     return req;
   };
   setRefreshAgentStatusHandler((agentId) => refreshAgent(agentId));
-  setSendSwarmMessageHandler((agentId, text, targetMember) =>
-    client.rpc(agySwarmSendMessage, { agentId, text, targetMember }),
+  setSendSwarmMessageHandler((agentId, text, targetMember, mode) =>
+    client.rpc(agySwarmSendMessage, { agentId, text, targetMember, mode }),
+  );
+  setFetchConsoleHandler((agentId, boardLimit) =>
+    client.rpc(agyConsoleGet, { agentId, boardLimit }),
   );
 
   const startWatch = () => {
@@ -423,6 +428,7 @@ export default function contribute(client: PluginClientContext) {
     setOpenConsoleHandler(null);
     setRefreshAgentStatusHandler(null);
     setSendSwarmMessageHandler(null);
+    setFetchConsoleHandler(null);
     for (const agentId of [...pills.keys()]) remove(agentId);
     clearAllStatuses();
     await disposePanel?.();

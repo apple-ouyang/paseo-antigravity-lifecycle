@@ -2,9 +2,17 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
-import type { AgentBgStatus, SubagentItem, SwarmMember } from "../shared/rpc.ts";
+import type {
+  AgentBgStatus,
+  AgyConsoleDetail,
+  SubagentItem,
+  SwarmMember,
+  SwarmSendMode,
+} from "../shared/rpc.ts";
 import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
 import {
+  fetchConsoleSnapshot,
+  formatLocalTimestamp,
   getStatusSnapshot,
   openConsoleForAgent,
   refreshAgentStatus,
@@ -87,29 +95,51 @@ function StatusContent({
   const [showCompleted, setShowCompleted] = useState(false);
   const [showDoneSteps, setShowDoneSteps] = useState(false);
   const [coordMsg, setCoordMsg] = useState("");
+  const [coordMode, setCoordMode] = useState<SwarmSendMode>("queue");
   const [coordSending, setCoordSending] = useState(false);
   const [coordFeedback, setCoordFeedback] = useState<string | null>(null);
+  const [digestOpen, setDigestOpen] = useState(false);
+  const [digestLoading, setDigestLoading] = useState(false);
+  const [digestData, setDigestData] = useState<AgyConsoleDetail | null>(null);
 
   const coordTarget = resolveCoordinatorChildFromStatus(status);
   const coordBadge = coordinatorStateMeta(status.coordinatorState, theme);
+  const pendingInboxCount = status.pendingInboxCount ?? 0;
+
+  const handleToggleDigest = async () => {
+    if (digestOpen) {
+      setDigestOpen(false);
+      return;
+    }
+    setDigestOpen(true);
+    setDigestLoading(true);
+    const snap = await fetchConsoleSnapshot(agentId, 6);
+    setDigestData(snap);
+    setDigestLoading(false);
+  };
 
   const handleSendToCoordinator = async () => {
     const trimmed = coordMsg.trim();
     if (!trimmed || coordSending) return;
     setCoordSending(true);
     setCoordFeedback(null);
-    const res = await sendSwarmMessage(agentId, trimmed, "coordinator");
+    const res = await sendSwarmMessage(agentId, trimmed, "coordinator", coordMode);
     setCoordSending(false);
     if (res.ok) {
       setCoordMsg("");
+      if (res.method === "hook_inbox") {
+        void refreshAgentStatus(agentId);
+      }
       setCoordFeedback(
-        res.method === "agentapi"
-          ? "✓ 已直达 @coordinator（未打断运行中的进程）"
-          : res.method === "hook_inbox"
-            ? status.coordinatorState === "wakeup_running"
-              ? "✓ 已投递给 @coordinator（下一步自动注入，不打断 Swarm 成员）"
-              : "✓ 已投递到 @coordinator 非中断收件箱（协调者下次唤醒时注入，不打断 Swarm 成员）"
-            : "✓ 已发送给 @coordinator",
+        coordMode === "interrupt"
+          ? "✓ 已立即唤醒 @coordinator（已中断上一轮挂起）"
+          : res.method === "agentapi"
+            ? "✓ 已直达 @coordinator（未打断运行中的进程）"
+            : res.method === "hook_inbox"
+              ? status.coordinatorState === "wakeup_running"
+                ? "✓ 已投递给 @coordinator（下一步自动注入，不打断 Swarm 成员）"
+                : "✓ 已投递到 @coordinator 非中断收件箱（协调者下次唤醒时注入，不打断 Swarm 成员）"
+              : "✓ 已发送给 @coordinator",
       );
     } else {
       setCoordFeedback(`发送失败：${res.error ?? "未知错误"}`);
@@ -203,24 +233,24 @@ function StatusContent({
         {/* 1. Real-time percentage progress bar + elapsed + ETA */}
         {status.progress ? <ProgressMeter progress={status.progress} theme={theme} compact /> : null}
 
-        {/* 1.5 Coordinator entry pinned at the top of the menu for 1-click chat & non-interrupting message */}
+        {/* 1.5 Coordinator entry pinned at the top of the menu for 1-click chat, instant digest & queue/interrupt messaging */}
         {coordTarget ? (
           <View
             style={{
               gap: 6,
               backgroundColor: theme.colors.surface1,
-              borderColor: theme.colors.accent,
+              borderColor:
+                coordMode === "interrupt" && status.backgroundActive
+                  ? theme.colors.statusWarning
+                  : theme.colors.accent,
               borderWidth: 1,
               borderRadius: 8,
               padding: 9,
             }}
           >
-            <Pressable
-              onPress={() => onOpenChild(coordTarget)}
-              style={{ gap: 2 }}
-            >
-              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+              <Pressable onPress={() => onOpenChild(coordTarget)} style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
                   <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "700" }} numberOfLines={1}>
                     @coordinator
                   </Text>
@@ -238,39 +268,201 @@ function StatusContent({
                       协调者
                     </Text>
                   </View>
+                  {pendingInboxCount > 0 ? (
+                    <View
+                      style={{
+                        backgroundColor: theme.colors.surface2,
+                        borderColor: theme.colors.statusWarning,
+                        borderWidth: 1,
+                        borderRadius: 4,
+                        paddingHorizontal: 5,
+                        paddingVertical: 1,
+                      }}
+                    >
+                      <Text style={{ color: theme.colors.statusWarning, fontSize: 10, fontWeight: "600" }}>
+                        待注入 {pendingInboxCount}
+                      </Text>
+                    </View>
+                  ) : null}
                   {status.coordinator?.stepCount ? (
                     <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
                       {status.coordinator.stepCount} 步
                     </Text>
                   ) : null}
                 </View>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
-                  <Text style={{ color: coordBadge.color, fontSize: 11, fontWeight: "600" }}>
-                    {coordBadge.label}
+                {status.coordinator?.lastActivity ? (
+                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
+                    {status.coordinator.lastActivity}
                   </Text>
+                ) : null}
+              </Pressable>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Text style={{ color: coordBadge.color, fontSize: 10, fontWeight: "600" }}>
+                  {coordBadge.label}
+                </Text>
+                <Pressable
+                  onPress={() => void handleToggleDigest()}
+                  style={{
+                    backgroundColor: digestOpen ? theme.colors.accent : theme.colors.surface2,
+                    borderColor: digestOpen ? theme.colors.accent : theme.colors.border,
+                    borderWidth: 1,
+                    borderRadius: 5,
+                    paddingHorizontal: 6,
+                    paddingVertical: 2,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: digestOpen ? theme.colors.accentForeground : theme.colors.foreground,
+                      fontSize: 10,
+                      fontWeight: "600",
+                    }}
+                  >
+                    {digestOpen ? "收起速览" : "⚡ 现状速览"}
+                  </Text>
+                </Pressable>
+                <Pressable onPress={() => onOpenChild(coordTarget)}>
                   <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
                     对话 ›
                   </Text>
-                </View>
+                </Pressable>
               </View>
-              {status.coordinator?.lastActivity ? (
-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
-                  {status.coordinator.lastActivity}
+            </View>
+
+            {/* Instant zero-interrupt status digest (latest board posts + live members, 0 tokens, 0 cancel) */}
+            {digestOpen ? (
+              <View
+                style={{
+                  backgroundColor: theme.colors.surface0,
+                  borderColor: theme.colors.border,
+                  borderWidth: 1,
+                  borderRadius: 6,
+                  padding: 7,
+                  gap: 5,
+                }}
+              >
+                <Text style={{ color: theme.colors.foreground, fontSize: 10, fontWeight: "700" }}>
+                  即时现状（只读，不打断任何成员）
                 </Text>
-              ) : null}
-            </Pressable>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+                  {status.summaryLine}
+                </Text>
+                {liveMembers.length > 0 ? (
+                  <View style={{ gap: 2 }}>
+                    <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
+                      当前活跃成员（{liveMembers.length}）
+                    </Text>
+                    {liveMembers.slice(0, 4).map((m) => (
+                      <Text key={`dg-${m.name}`} style={{ color: theme.colors.foreground, fontSize: 10 }} numberOfLines={1}>
+                        • @{m.name}（{m.state === "working" ? "运行中" : "待命"}）：{m.lastActivity ?? "处理中"}
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+                {digestLoading ? (
+                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+                    正在拉取最新消息板…
+                  </Text>
+                ) : digestData && digestData.boardPosts.length > 0 ? (
+                  <View style={{ gap: 2 }}>
+                    <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
+                      最新消息板（#{digestData.boardPosts[digestData.boardPosts.length - 1]?.seq ?? 0}）
+                    </Text>
+                    {digestData.boardPosts.slice(-3).reverse().map((p) => {
+                      const ts = formatLocalTimestamp(p.time);
+                      const clean = p.text.replace(/\s+/g, " ").trim();
+                      return (
+                        <Text key={`dgp-${p.seq}`} style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={2}>
+                          #{p.seq} {ts ? `[${ts}] ` : ""}@{p.agent}: {clean.slice(0, 120)}
+                        </Text>
+                      );
+                    })}
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
+            {/* Mode selector: safe non-interrupting queue vs explicit immediate interrupt */}
+            {status.backgroundActive ? (
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                  <Pressable
+                    onPress={() => setCoordMode("queue")}
+                    style={{
+                      backgroundColor:
+                        coordMode === "queue" ? theme.colors.surface2 : theme.colors.surface0,
+                      borderColor:
+                        coordMode === "queue" ? theme.colors.accent : theme.colors.border,
+                      borderWidth: 1,
+                      borderRadius: 5,
+                      paddingHorizontal: 6,
+                      paddingVertical: 2,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          coordMode === "queue" ? theme.colors.accent : theme.colors.foregroundMuted,
+                        fontSize: 10,
+                        fontWeight: "600",
+                      }}
+                    >
+                      不打断（排队）
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => setCoordMode("interrupt")}
+                    style={{
+                      backgroundColor:
+                        coordMode === "interrupt" ? theme.colors.surface2 : theme.colors.surface0,
+                      borderColor:
+                        coordMode === "interrupt" ? theme.colors.statusWarning : theme.colors.border,
+                      borderWidth: 1,
+                      borderRadius: 5,
+                      paddingHorizontal: 6,
+                      paddingVertical: 2,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          coordMode === "interrupt"
+                            ? theme.colors.statusWarning
+                            : theme.colors.foregroundMuted,
+                        fontSize: 10,
+                        fontWeight: "600",
+                      }}
+                    >
+                      立即打断唤醒
+                    </Text>
+                  </Pressable>
+                </View>
+                {coordMode === "interrupt" ? (
+                  <Text style={{ color: theme.colors.statusWarning, fontSize: 10 }} numberOfLines={1}>
+                    ⚠️ 会中止运行中成员
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
 
             <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
               <TextInput
                 value={coordMsg}
                 onChangeText={setCoordMsg}
-                placeholder="发给协调者（不打断运行中的进程）…"
+                placeholder={
+                  coordMode === "interrupt" && status.backgroundActive
+                    ? "立即唤醒协调者（会中止运行中的 Swarm 成员）…"
+                    : "发给协调者（不打断运行中的进程）…"
+                }
                 placeholderTextColor={theme.colors.foregroundMuted}
                 onSubmitEditing={() => void handleSendToCoordinator()}
                 style={{
                   flex: 1,
                   backgroundColor: theme.colors.surface0,
-                  borderColor: theme.colors.border,
+                  borderColor:
+                    coordMode === "interrupt" && status.backgroundActive
+                      ? theme.colors.statusWarning
+                      : theme.colors.border,
                   borderWidth: 1,
                   borderRadius: 6,
                   paddingHorizontal: 8,
@@ -284,7 +476,11 @@ function StatusContent({
                 onPress={() => void handleSendToCoordinator()}
                 style={{
                   backgroundColor:
-                    coordSending || !coordMsg.trim() ? theme.colors.surface2 : theme.colors.accent,
+                    coordSending || !coordMsg.trim()
+                      ? theme.colors.surface2
+                      : coordMode === "interrupt" && status.backgroundActive
+                        ? theme.colors.statusWarning
+                        : theme.colors.accent,
                   borderRadius: 6,
                   paddingHorizontal: 10,
                   paddingVertical: 6,
@@ -300,7 +496,11 @@ function StatusContent({
                     fontWeight: "600",
                   }}
                 >
-                  {coordSending ? "发送中" : "发送"}
+                  {coordSending
+                    ? "发送中"
+                    : coordMode === "interrupt" && status.backgroundActive
+                      ? "打断发"
+                      : "发送"}
                 </Text>
               </Pressable>
             </View>

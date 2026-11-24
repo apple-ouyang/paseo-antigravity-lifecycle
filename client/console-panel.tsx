@@ -1211,6 +1211,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   const [boardNewestFirst, setBoardNewestFirst] = useState(false);
   const [composeTarget, setComposeTarget] = useState<string>("coordinator");
   const [composeText, setComposeText] = useState("");
+  const [sendMode, setSendMode] = useState<"queue" | "interrupt">("queue");
   const [sending, setSending] = useState(false);
   const [sendFeedback, setSendFeedback] = useState<string | null>(null);
   const [overviewCoordText, setOverviewCoordText] = useState("");
@@ -1695,15 +1696,18 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         agentId,
         text: body,
         targetMember: memberName,
+        mode: sendMode,
       });
       if (res.ok) {
         setChildReplyText("");
         const suffix =
-          res.method === "agentapi"
-            ? "（未打断运行中的进程）"
-            : res.method === "hook_inbox"
-              ? "（非中断收件箱：协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
-              : "";
+          sendMode === "interrupt"
+            ? "（已立即唤醒，中止了上一轮挂起）"
+            : res.method === "agentapi"
+              ? "（未打断运行中的进程）"
+              : res.method === "hook_inbox"
+                ? "（非中断收件箱：协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
+                : "";
         setChildSendFeedback(
           memberName === "coordinator"
             ? `✓ 已投递给 @coordinator${suffix}`
@@ -1729,15 +1733,18 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         agentId,
         text: body,
         targetMember: "coordinator",
+        mode: sendMode,
       });
       if (res.ok) {
         setOverviewCoordText("");
         setOverviewCoordFeedback(
-          res.method === "agentapi"
-            ? "✓ 已直达 @coordinator（未打断运行中的 Swarm 成员）"
-            : res.method === "hook_inbox"
-              ? "✓ 已投递到 @coordinator 非中断收件箱（协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
-              : "✓ 已发送给 @coordinator",
+          sendMode === "interrupt"
+            ? "✓ 已立即唤醒 @coordinator（已中断上一轮挂起）"
+            : res.method === "agentapi"
+              ? "✓ 已直达 @coordinator（未打断运行中的 Swarm 成员）"
+              : res.method === "hook_inbox"
+                ? "✓ 已投递到 @coordinator 非中断收件箱（协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
+                : "✓ 已发送给 @coordinator",
         );
       } else {
         setOverviewCoordFeedback(`发送失败：${res.error ?? "未知错误"}`);
@@ -1759,15 +1766,18 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         agentId,
         text: body,
         targetMember: composeTarget,
+        mode: sendMode,
       });
       if (res.ok) {
         setComposeText("");
         const suffix =
-          res.method === "agentapi"
-            ? "（未打断运行中的进程）"
-            : res.method === "hook_inbox"
-              ? "（非中断收件箱：协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
-              : "";
+          sendMode === "interrupt"
+            ? "（已立即唤醒，中止了上一轮挂起）"
+            : res.method === "agentapi"
+              ? "（未打断运行中的进程）"
+              : res.method === "hook_inbox"
+                ? "（非中断收件箱：协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
+                : "";
         setSendFeedback(
           composeTarget === "coordinator"
             ? `✓ 已投递给 @coordinator${suffix}`
@@ -2007,21 +2017,53 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
               gap: 6,
             }}
           >
+            {status?.backgroundActive ? (
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <Chip
+                    label="不打断（排队）"
+                    color={theme.colors.accent}
+                    theme={theme}
+                    active={sendMode === "queue"}
+                    onPress={() => setSendMode("queue")}
+                  />
+                  <Chip
+                    label="立即打断唤醒"
+                    color={theme.colors.statusWarning}
+                    theme={theme}
+                    active={sendMode === "interrupt"}
+                    onPress={() => setSendMode("interrupt")}
+                  />
+                </View>
+                {sendMode === "interrupt" ? (
+                  <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                    ⚠️ 会中止当前运行中的 Swarm 成员
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <TextInput
                 value={childReplyText}
                 onChangeText={setChildReplyText}
                 placeholder={
-                  selectedChild.memberName === "coordinator"
-                    ? "给 @coordinator 发消息（直达协调者，不打断运行中的进程）…"
-                    : `给 @${selectedChild.memberName} 发指令（经协调者转达，不打断运行中的进程）…`
+                  sendMode === "interrupt" && status?.backgroundActive
+                    ? selectedChild.memberName === "coordinator"
+                      ? "立即唤醒 @coordinator（会中止运行中的成员）…"
+                      : `立即唤醒协调者转达给 @${selectedChild.memberName}（会中止运行中的成员）…`
+                    : selectedChild.memberName === "coordinator"
+                      ? "给 @coordinator 发消息（不打断运行中的进程）…"
+                      : `给 @${selectedChild.memberName} 发指令（经协调者转达，不打断运行中的进程）…`
                 }
                 placeholderTextColor={theme.colors.foregroundMuted}
                 onSubmitEditing={() => void handleSendToChildMember()}
                 style={{
                   flex: 1,
                   backgroundColor: theme.colors.surface0,
-                  borderColor: theme.colors.border,
+                  borderColor:
+                    sendMode === "interrupt" && status?.backgroundActive
+                      ? theme.colors.statusWarning
+                      : theme.colors.border,
                   borderWidth: 1,
                   borderRadius: 7,
                   paddingHorizontal: 10,
@@ -2037,7 +2079,9 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                   backgroundColor:
                     childSending || !childReplyText.trim()
                       ? theme.colors.surface2
-                      : theme.colors.accent,
+                      : sendMode === "interrupt" && status?.backgroundActive
+                        ? theme.colors.statusWarning
+                        : theme.colors.accent,
                   borderRadius: 7,
                   paddingHorizontal: 12,
                   paddingVertical: 7,
@@ -2053,7 +2097,11 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                     fontWeight: "600",
                   }}
                 >
-                  {childSending ? "发送中" : "发送"}
+                  {childSending
+                    ? "发送中"
+                    : sendMode === "interrupt" && status?.backgroundActive
+                      ? "打断发送"
+                      : "发送"}
                 </Text>
               </Pressable>
             </View>
@@ -2305,17 +2353,56 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                 />
               </View>
 
+              {(status.pendingInboxCount ?? 0) > 0 ? (
+                <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                  非中断收件箱待注入：{status.pendingInboxCount} 条（协调者下次唤醒时自动处理）
+                </Text>
+              ) : null}
+
+              {status.backgroundActive ? (
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Chip
+                      label="不打断（排队）"
+                      color={theme.colors.accent}
+                      theme={theme}
+                      active={sendMode === "queue"}
+                      onPress={() => setSendMode("queue")}
+                    />
+                    <Chip
+                      label="立即打断唤醒"
+                      color={theme.colors.statusWarning}
+                      theme={theme}
+                      active={sendMode === "interrupt"}
+                      onPress={() => setSendMode("interrupt")}
+                    />
+                  </View>
+                  {sendMode === "interrupt" ? (
+                    <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                      ⚠️ 会中止运行中的 Swarm 成员
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                 <TextInput
                   value={overviewCoordText}
                   onChangeText={setOverviewCoordText}
-                  placeholder="给 @coordinator 发消息（直达协调者，不打断运行中的 Swarm 成员）…"
+                  placeholder={
+                    sendMode === "interrupt" && status.backgroundActive
+                      ? "立即唤醒 @coordinator（会中止当前运行中的 Swarm 成员）…"
+                      : "给 @coordinator 发消息（不打断运行中的 Swarm 成员）…"
+                  }
                   placeholderTextColor={theme.colors.foregroundMuted}
                   onSubmitEditing={() => void handleSendOverviewCoordinator()}
                   style={{
                     flex: 1,
                     backgroundColor: theme.colors.surface0,
-                    borderColor: theme.colors.border,
+                    borderColor:
+                      sendMode === "interrupt" && status.backgroundActive
+                        ? theme.colors.statusWarning
+                        : theme.colors.border,
                     borderWidth: 1,
                     borderRadius: 7,
                     paddingHorizontal: 10,
@@ -2331,7 +2418,9 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                     backgroundColor:
                       overviewCoordSending || !overviewCoordText.trim()
                         ? theme.colors.surface2
-                        : theme.colors.accent,
+                        : sendMode === "interrupt" && status.backgroundActive
+                          ? theme.colors.statusWarning
+                          : theme.colors.accent,
                     borderRadius: 7,
                     paddingHorizontal: 12,
                     paddingVertical: 7,
@@ -2347,7 +2436,11 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                       fontWeight: "600",
                     }}
                   >
-                    {overviewCoordSending ? "发送中" : "发送"}
+                    {overviewCoordSending
+                      ? "发送中"
+                      : sendMode === "interrupt" && status.backgroundActive
+                        ? "打断发送"
+                        : "发送"}
                   </Text>
                 </Pressable>
               </View>
@@ -2990,21 +3083,53 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                 ))}
               </View>
             </ScrollView>
+            {status.backgroundActive ? (
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <Chip
+                    label="不打断（排队）"
+                    color={theme.colors.accent}
+                    theme={theme}
+                    active={sendMode === "queue"}
+                    onPress={() => setSendMode("queue")}
+                  />
+                  <Chip
+                    label="立即打断唤醒"
+                    color={theme.colors.statusWarning}
+                    theme={theme}
+                    active={sendMode === "interrupt"}
+                    onPress={() => setSendMode("interrupt")}
+                  />
+                </View>
+                {sendMode === "interrupt" ? (
+                  <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                    ⚠️ 会中止运行中成员
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
               <TextInput
                 value={composeText}
                 onChangeText={setComposeText}
                 placeholder={
-                  composeTarget === "coordinator"
-                    ? "给协调者发指令（不打断运行中的进程）…"
-                    : `让协调者转达给 @${composeTarget}（不打断运行中的进程）…`
+                  sendMode === "interrupt" && status.backgroundActive
+                    ? composeTarget === "coordinator"
+                      ? "立即唤醒协调者（会中止运行中的成员）…"
+                      : `立即唤醒协调者转达给 @${composeTarget}（会中止运行中的成员）…`
+                    : composeTarget === "coordinator"
+                      ? "给协调者发指令（不打断运行中的进程）…"
+                      : `让协调者转达给 @${composeTarget}（不打断运行中的进程）…`
                 }
                 placeholderTextColor={theme.colors.foregroundMuted}
                 style={{
                   flex: 1,
                   color: theme.colors.foreground,
                   backgroundColor: theme.colors.surface2,
-                  borderColor: theme.colors.border,
+                  borderColor:
+                    sendMode === "interrupt" && status.backgroundActive
+                      ? theme.colors.statusWarning
+                      : theme.colors.border,
                   borderWidth: 1,
                   borderRadius: 7,
                   paddingHorizontal: 10,
@@ -3018,7 +3143,11 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                 onPress={() => void handleSendDirective()}
                 style={{
                   backgroundColor:
-                    sending || !composeText.trim() ? theme.colors.surface2 : theme.colors.accent,
+                    sending || !composeText.trim()
+                      ? theme.colors.surface2
+                      : sendMode === "interrupt" && status.backgroundActive
+                        ? theme.colors.statusWarning
+                        : theme.colors.accent,
                   borderRadius: 7,
                   paddingHorizontal: 12,
                   paddingVertical: 7,
@@ -3034,7 +3163,11 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                     fontWeight: "600",
                   }}
                 >
-                  {sending ? "发送中" : "发送"}
+                  {sending
+                    ? "发送中"
+                    : sendMode === "interrupt" && status.backgroundActive
+                      ? "打断发送"
+                      : "发送"}
                 </Text>
               </Pressable>
             </View>
