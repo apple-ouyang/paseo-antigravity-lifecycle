@@ -1,8 +1,9 @@
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type {
   AgyConsoleDetail,
+  ChildTranscriptResponse,
   SwarmBoardPost,
   SwarmPlan,
   TranscriptStep,
@@ -10,7 +11,6 @@ import type {
 import {
   inspectAgySession,
   readJsonSafe,
-  readTranscriptRows,
   summarizeToolCall,
   type InspectAgySessionInput,
 } from "./status.ts";
@@ -155,17 +155,254 @@ function clipText(text: string, maxLen = 420): string {
   return `${trimmed.slice(0, maxLen - 1)}…`;
 }
 
+interface RawTranscriptRow {
+  step_index?: number;
+  type?: string;
+  status?: string;
+  created_at?: string;
+  model?: string;
+  content?: string;
+  thinking?: string;
+  tool_calls?: Array<{ name?: string; args?: Record<string, unknown> }>;
+}
+
+interface CachedTranscript {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  byteOffset: number;
+  remainder: Buffer;
+  model: string | null;
+  steps: TranscriptStep[];
+  lastAccessedAt: number;
+}
+
+const MAX_TRANSCRIPT_CACHE = 200;
+const transcriptCache = new Map<string, CachedTranscript>();
+
+export function clearTranscriptCache(): void {
+  transcriptCache.clear();
+}
+
+function evictTranscriptCacheIfNeeded(): void {
+  if (transcriptCache.size <= MAX_TRANSCRIPT_CACHE) return;
+  let oldestKey: string | null = null;
+  let oldestTs = Infinity;
+  for (const [k, entry] of transcriptCache) {
+    if (entry.lastAccessedAt < oldestTs) {
+      oldestTs = entry.lastAccessedAt;
+      oldestKey = k;
+    }
+  }
+  if (oldestKey) transcriptCache.delete(oldestKey);
+}
+
+function parseTranscriptRowIntoSteps(
+  r: RawTranscriptRow,
+  steps: TranscriptStep[],
+  currentModel: string | null,
+): string | null {
+  let latestModel = currentModel;
+  const stepIndex = typeof r.step_index === "number" ? r.step_index : steps.length;
+  const model = typeof r.model === "string" && r.model.length > 0 ? r.model : null;
+  if (model) latestModel = model;
+  const status = typeof r.status === "string" ? r.status : null;
+  const createdAt = typeof r.created_at === "string" ? r.created_at : null;
+
+  if (r.type === "USER_INPUT") {
+    steps.push({
+      stepIndex,
+      kind: "user",
+      title: "任务输入",
+      summary: clipText(r.content ?? "", 600),
+      status,
+      createdAt,
+      model,
+    });
+  } else if (r.type === "ERROR_MESSAGE") {
+    steps.push({
+      stepIndex,
+      kind: "error",
+      title: "错误",
+      summary: clipText(r.content ?? "执行报错", 800),
+      status,
+      createdAt,
+      model,
+    });
+  } else if (r.type === "SYSTEM_MESSAGE") {
+    const content = r.content ?? "";
+    if (content.includes("[board]") || content.includes("[Message]") || content.includes("[swarm]")) {
+      steps.push({
+        stepIndex,
+        kind: "system",
+        title: content.includes("[board]") ? "消息板通知" : "系统唤醒",
+        summary: clipText(content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "), 400),
+        status,
+        createdAt,
+        model,
+      });
+    }
+  } else if (r.type === "PLANNER_RESPONSE") {
+    if (r.tool_calls && r.tool_calls.length > 0) {
+      const summaries = r.tool_calls.map((tc) => summarizeToolCall(tc));
+      steps.push({
+        stepIndex,
+        kind: "tool",
+        title: summaries.length === 1 ? summaries[0] : `${summaries.length} 个工具调用`,
+        summary: summaries.join(" · "),
+        status,
+        createdAt,
+        model,
+      });
+    }
+    if (r.content && r.content.trim().length > 0) {
+      steps.push({
+        stepIndex,
+        kind: "assistant",
+        title: "回复输出",
+        summary: clipText(r.content, 1200),
+        status,
+        createdAt,
+        model,
+      });
+    } else if (r.thinking && r.thinking.trim().length > 0 && !(r.tool_calls && r.tool_calls.length > 0)) {
+      steps.push({
+        stepIndex,
+        kind: "thinking",
+        title: "思考中",
+        summary: clipText(r.thinking, 400),
+        status,
+        createdAt,
+        model,
+      });
+    }
+  }
+
+  return latestModel;
+}
+
+function appendChunkToCache(entry: CachedTranscript, chunk: Buffer): void {
+  const combined = entry.remainder.length > 0 ? Buffer.concat([entry.remainder, chunk]) : chunk;
+  const lastNewline = combined.lastIndexOf(0x0a);
+  if (lastNewline < 0) {
+    entry.remainder = combined;
+    return;
+  }
+  const completeText = combined.subarray(0, lastNewline).toString("utf8");
+  entry.remainder = combined.subarray(lastNewline + 1);
+
+  for (const line of completeText.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as RawTranscriptRow;
+      if (parsed && typeof parsed === "object") {
+        entry.model = parseTranscriptRowIntoSteps(parsed, entry.steps, entry.model);
+      }
+    } catch {
+      // Ignore malformed JSONL line during concurrent write.
+    }
+  }
+}
+
+function readBytesRange(filePath: string, offset: number, length: number): Buffer {
+  if (length <= 0) return Buffer.alloc(0);
+  const fd = openSync(filePath, "r");
+  try {
+    const buf = Buffer.allocUnsafe(length);
+    let totalRead = 0;
+    while (totalRead < length) {
+      const n = readSync(fd, buf, totalRead, length - totalRead, offset + totalRead);
+      if (n <= 0) break;
+      totalRead += n;
+    }
+    return totalRead === length ? buf : buf.subarray(0, totalRead);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function loadCachedTranscript(txPath: string): CachedTranscript | null {
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(txPath);
+  } catch {
+    transcriptCache.delete(txPath);
+    return null;
+  }
+
+  const now = Date.now();
+  const cached = transcriptCache.get(txPath);
+  if (cached && cached.ino === st.ino && cached.size === st.size && cached.mtimeMs === st.mtimeMs) {
+    cached.lastAccessedAt = now;
+    return cached;
+  }
+
+  if (cached && cached.ino === st.ino && st.size >= cached.byteOffset) {
+    const deltaLen = st.size - cached.byteOffset;
+    if (deltaLen > 0) {
+      try {
+        const chunk = readBytesRange(txPath, cached.byteOffset, deltaLen);
+        appendChunkToCache(cached, chunk);
+        cached.byteOffset += chunk.length;
+      } catch {
+        // Fall through to keep previous cache snapshot on transient read failure.
+      }
+    }
+    cached.size = st.size;
+    cached.mtimeMs = st.mtimeMs;
+    cached.lastAccessedAt = now;
+    return cached;
+  }
+
+  // Fresh load or file rotated/truncated -> full parse from byte 0
+  let fullBuf: Buffer;
+  try {
+    fullBuf = readFileSync(txPath);
+  } catch {
+    return null;
+  }
+
+  const entry: CachedTranscript = {
+    ino: st.ino,
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    byteOffset: fullBuf.length,
+    remainder: Buffer.alloc(0),
+    model: null,
+    steps: [],
+    lastAccessedAt: now,
+  };
+  appendChunkToCache(entry, fullBuf);
+  // If file doesn't end with '\n' yet, try parsing trailing line without consuming remainder
+  // so complete single-line files still parse, while truncated JSON waits for next append.
+  if (entry.remainder.length > 0) {
+    const trailing = entry.remainder.toString("utf8").trim();
+    if (trailing.startsWith("{") && trailing.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trailing) as RawTranscriptRow;
+        if (parsed && typeof parsed === "object") {
+          entry.model = parseTranscriptRowIntoSteps(parsed, entry.steps, entry.model);
+          entry.remainder = Buffer.alloc(0);
+        }
+      } catch {
+        // Incomplete JSON fragment; keep in remainder until trailing newline arrives.
+      }
+    }
+  }
+
+  transcriptCache.set(txPath, entry);
+  evictTranscriptCacheIfNeeded();
+  return entry;
+}
+
 export function readChildTranscript(
   brainRoot: string,
   allowedIds: Set<string>,
   conversationId: string,
-  limit = 40,
-): {
-  conversationId: string;
-  model: string | null;
-  steps: TranscriptStep[];
-  totalSteps: number;
-} | null {
+  limit = 60,
+  afterCursor?: number,
+): ChildTranscriptResponse | null {
   if (
     !conversationId ||
     conversationId.includes("/") ||
@@ -176,93 +413,54 @@ export function readChildTranscript(
   }
 
   const txPath = path.join(brainRoot, conversationId, ".system_generated", "logs", "transcript.jsonl");
-  const rows = readTranscriptRows(txPath);
-  let latestModel: string | null = null;
-  const steps: TranscriptStep[] = [];
-
-  for (const r of rows) {
-    const stepIndex = typeof r.step_index === "number" ? r.step_index : steps.length;
-    const model = typeof r.model === "string" && r.model.length > 0 ? r.model : null;
-    if (model) latestModel = model;
-    const status = typeof r.status === "string" ? r.status : null;
-    const createdAt = typeof r.created_at === "string" ? r.created_at : null;
-
-    if (r.type === "USER_INPUT") {
-      steps.push({
-        stepIndex,
-        kind: "user",
-        title: "任务输入",
-        summary: clipText(r.content ?? "", 600),
-        status,
-        createdAt,
-        model,
-      });
-    } else if (r.type === "ERROR_MESSAGE") {
-      steps.push({
-        stepIndex,
-        kind: "error",
-        title: "错误",
-        summary: clipText(r.content ?? "执行报错", 800),
-        status,
-        createdAt,
-        model,
-      });
-    } else if (r.type === "SYSTEM_MESSAGE") {
-      const content = r.content ?? "";
-      if (content.includes("[board]") || content.includes("[Message]") || content.includes("[swarm]")) {
-        steps.push({
-          stepIndex,
-          kind: "system",
-          title: content.includes("[board]") ? "消息板通知" : "系统唤醒",
-          summary: clipText(content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "), 400),
-          status,
-          createdAt,
-          model,
-        });
-      }
-    } else if (r.type === "PLANNER_RESPONSE") {
-      if (r.tool_calls && r.tool_calls.length > 0) {
-        const summaries = r.tool_calls.map((tc) => summarizeToolCall(tc));
-        steps.push({
-          stepIndex,
-          kind: "tool",
-          title: summaries.length === 1 ? summaries[0] : `${summaries.length} 个工具调用`,
-          summary: summaries.join(" · "),
-          status,
-          createdAt,
-          model,
-        });
-      }
-      if (r.content && r.content.trim().length > 0) {
-        steps.push({
-          stepIndex,
-          kind: "assistant",
-          title: "回复输出",
-          summary: clipText(r.content, 1200),
-          status,
-          createdAt,
-          model,
-        });
-      } else if (r.thinking && r.thinking.trim().length > 0 && !(r.tool_calls && r.tool_calls.length > 0)) {
-        steps.push({
-          stepIndex,
-          kind: "thinking",
-          title: "思考中",
-          summary: clipText(r.thinking, 400),
-          status,
-          createdAt,
-          model,
-        });
-      }
-    }
+  const entry = loadCachedTranscript(txPath);
+  if (!entry) {
+    return {
+      conversationId,
+      model: null,
+      steps: [],
+      totalSteps: 0,
+      cursor: 0,
+      mode: afterCursor !== undefined && afterCursor === 0 ? "delta" : "full",
+      unchanged: afterCursor === 0,
+    };
   }
 
-  const tail = steps.length > limit ? steps.slice(steps.length - limit) : steps;
+  const totalSteps = entry.steps.length;
+  if (afterCursor !== undefined && afterCursor >= 0 && afterCursor <= totalSteps) {
+    if (afterCursor === totalSteps) {
+      return {
+        conversationId,
+        model: entry.model,
+        steps: [],
+        totalSteps,
+        cursor: totalSteps,
+        mode: "delta",
+        unchanged: true,
+      };
+    }
+    const delta = entry.steps.slice(afterCursor);
+    const boundedDelta = delta.length > limit ? delta.slice(delta.length - limit) : delta;
+    return {
+      conversationId,
+      model: entry.model,
+      steps: boundedDelta,
+      totalSteps,
+      cursor: totalSteps,
+      mode: "delta",
+      unchanged: false,
+    };
+  }
+
+  const tail = totalSteps > limit ? entry.steps.slice(totalSteps - limit) : entry.steps;
   return {
     conversationId,
-    model: latestModel,
+    model: entry.model,
     steps: tail,
-    totalSteps: steps.length,
+    totalSteps,
+    cursor: totalSteps,
+    mode: "full",
+    unchanged: false,
   };
 }
 

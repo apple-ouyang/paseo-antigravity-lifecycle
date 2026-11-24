@@ -3,6 +3,7 @@ import path from "node:path";
 import type { PaseoApi, PaseoAgent } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
+  clearTranscriptCache,
   collectAllowedChildIds,
   inspectAgyConsole,
   readChildTranscript,
@@ -67,26 +68,74 @@ async function resolveSessionId(
   return sessionId;
 }
 
+interface ResolvedSession {
+  agentId: string;
+  sessionId: string;
+  agentAlive: boolean;
+  updatedAt: number;
+}
+
+const KNOWN_SESSION_TTL_MS = 60_000;
+
 async function resolveAgentAndSession(
   paseo: PaseoApi,
   agentId: string,
   refreshedAt: Map<string, number>,
-): Promise<{ agent: PaseoAgent; sessionId: string } | null> {
+  inFlightRefresh: Map<string, Promise<unknown>>,
+  knownSessions: Map<string, ResolvedSession>,
+): Promise<ResolvedSession | null> {
   const handle = paseo.agents.ref(agentId);
-  if (!handle.current() && Date.now() - (refreshedAt.get(agentId) ?? 0) > 1_000) {
-    refreshedAt.set(agentId, Date.now());
-    await handle.refresh().catch(() => null);
+  let agent = handle.current();
+
+  if (!agent) {
+    // Share any in-flight refresh promise so concurrent RPCs (e.g. console.get + child.transcript)
+    // never race past each other and return null before handle.refresh() settles.
+    const existingFlight = inFlightRefresh.get(agentId);
+    if (existingFlight) {
+      await existingFlight.catch(() => null);
+      agent = handle.current();
+    } else if (Date.now() - (refreshedAt.get(agentId) ?? 0) > 1_000) {
+      refreshedAt.set(agentId, Date.now());
+      const flight = handle.refresh().catch(() => null);
+      inFlightRefresh.set(agentId, flight);
+      try {
+        await flight;
+      } finally {
+        if (inFlightRefresh.get(agentId) === flight) {
+          inFlightRefresh.delete(agentId);
+        }
+      }
+      agent = handle.current();
+    }
   }
-  const agent = handle.current();
-  if (!agent || !isAgyProvider(agent.provider)) return null;
-  const sessionId = await resolveSessionId(paseo, agent, refreshedAt);
-  if (!sessionId) return null;
-  return { agent, sessionId };
+
+  if (agent) {
+    if (!isAgyProvider(agent.provider)) return null;
+    const sessionId = await resolveSessionId(paseo, agent, refreshedAt);
+    if (sessionId) {
+      const resolved: ResolvedSession = {
+        agentId: agent.id,
+        sessionId,
+        agentAlive: !agent.archivedAt && agent.status !== "closed",
+        updatedAt: Date.now(),
+      };
+      knownSessions.set(agent.id, resolved);
+      return resolved;
+    }
+  }
+
+  // Fallback to recently observed session from the background watch loop
+  const cached = knownSessions.get(agentId);
+  if (cached && Date.now() - cached.updatedAt < KNOWN_SESSION_TTL_MS) {
+    return cached;
+  }
+  return null;
 }
 
 async function collectActiveAgyAgents(
   paseo: PaseoApi,
   refreshedAt: Map<string, number>,
+  knownSessions: Map<string, ResolvedSession>,
 ): Promise<Record<string, AgentBgStatus>> {
   const result: Record<string, AgentBgStatus> = {};
   const list = await paseo.agents.list({ page: { limit: 200 } });
@@ -96,6 +145,12 @@ async function collectActiveAgyAgents(
     if (agent.archivedAt || agent.status === "closed") continue;
     const sessionId = await resolveSessionId(paseo, agent, refreshedAt);
     if (!sessionId) continue;
+    knownSessions.set(agent.id, {
+      agentId: agent.id,
+      sessionId,
+      agentAlive: true,
+      updatedAt: now,
+    });
     const status = inspectAgySession({
       agentId: agent.id,
       sessionId,
@@ -111,6 +166,8 @@ async function collectActiveAgyAgents(
 
 export default function contribute(server: PluginServerContext) {
   const refreshedAt = new Map<string, number>();
+  const inFlightRefresh = new Map<string, Promise<unknown>>();
+  const knownSessions = new Map<string, ResolvedSession>();
   const brainRoot = path.join(homedir(), ".gemini", "antigravity-cli", "brain");
 
   try {
@@ -138,28 +195,46 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.handle(agyLifecycleGet, async ({ agentId }, context) => {
-    const resolved = await resolveAgentAndSession(context.paseo, agentId, refreshedAt);
+    const resolved = await resolveAgentAndSession(
+      context.paseo,
+      agentId,
+      refreshedAt,
+      inFlightRefresh,
+      knownSessions,
+    );
     if (!resolved) return null;
     return inspectAgySession({
-      agentId: resolved.agent.id,
+      agentId: resolved.agentId,
       sessionId: resolved.sessionId,
-      agentAlive: !resolved.agent.archivedAt && resolved.agent.status !== "closed",
+      agentAlive: resolved.agentAlive,
     });
   });
 
   server.handle(agyConsoleGet, async ({ agentId, boardLimit }, context) => {
-    const resolved = await resolveAgentAndSession(context.paseo, agentId, refreshedAt);
+    const resolved = await resolveAgentAndSession(
+      context.paseo,
+      agentId,
+      refreshedAt,
+      inFlightRefresh,
+      knownSessions,
+    );
     if (!resolved) return null;
     return inspectAgyConsole({
-      agentId: resolved.agent.id,
+      agentId: resolved.agentId,
       sessionId: resolved.sessionId,
-      agentAlive: !resolved.agent.archivedAt && resolved.agent.status !== "closed",
+      agentAlive: resolved.agentAlive,
       boardLimit,
     });
   });
 
   server.handle(agyBoardSliceGet, async ({ agentId, since, limit }, context) => {
-    const resolved = await resolveAgentAndSession(context.paseo, agentId, refreshedAt);
+    const resolved = await resolveAgentAndSession(
+      context.paseo,
+      agentId,
+      refreshedAt,
+      inFlightRefresh,
+      knownSessions,
+    );
     if (!resolved) return { posts: [], latestSeq: 0 };
     const board = readSwarmBoard(brainRoot, resolved.sessionId, {
       since,
@@ -171,17 +246,23 @@ export default function contribute(server: PluginServerContext) {
     };
   });
 
-  server.handle(agyChildTranscriptGet, async ({ agentId, conversationId, limit }, context) => {
-    const resolved = await resolveAgentAndSession(context.paseo, agentId, refreshedAt);
+  server.handle(agyChildTranscriptGet, async ({ agentId, conversationId, limit, afterCursor }, context) => {
+    const resolved = await resolveAgentAndSession(
+      context.paseo,
+      agentId,
+      refreshedAt,
+      inFlightRefresh,
+      knownSessions,
+    );
     if (!resolved) return null;
     const status = inspectAgySession({
-      agentId: resolved.agent.id,
+      agentId: resolved.agentId,
       sessionId: resolved.sessionId,
-      agentAlive: !resolved.agent.archivedAt && resolved.agent.status !== "closed",
+      agentAlive: resolved.agentAlive,
     });
     if (!status) return null;
     const allowed = collectAllowedChildIds(status);
-    return readChildTranscript(brainRoot, allowed, conversationId, limit ?? 40);
+    return readChildTranscript(brainRoot, allowed, conversationId, limit ?? 60, afterCursor);
   });
 
   server.handle(agyLifecycleWatch, (_input, context) => {
@@ -204,7 +285,7 @@ export default function contribute(server: PluginServerContext) {
         if (context.signal.aborted || inFlight) return;
         inFlight = true;
         try {
-          const agents = await collectActiveAgyAgents(context.paseo, refreshedAt);
+          const agents = await collectActiveAgyAgents(context.paseo, refreshedAt, knownSessions);
           const hash = stableSignature(agents);
           if (!context.signal.aborted && hash !== lastHash) {
             lastHash = hash;
@@ -228,5 +309,8 @@ export default function contribute(server: PluginServerContext) {
 
   return () => {
     refreshedAt.clear();
+    inFlightRefresh.clear();
+    knownSessions.clear();
+    clearTranscriptCache();
   };
 }

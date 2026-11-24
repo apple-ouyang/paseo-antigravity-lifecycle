@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  clearTranscriptCache,
   collectAllowedChildIds,
   inspectAgyConsole,
   readChildTranscript,
@@ -310,6 +311,76 @@ test("inspectAgySession computes current-wave Swarm progress percentage, [done] 
     const laneB = st.swarm?.members.find((m) => m.name === "lane-b");
     assert.deepEqual(laneB?.stepProgress, { done: 1, total: 2 });
   } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("readChildTranscript caches parsed steps and returns byte-incremental deltas safely", () => {
+  clearTranscriptCache();
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-delta-"));
+  try {
+    const brain = path.join(homeDir, ".gemini", "antigravity-cli", "brain");
+    const txPath = path.join(brain, "worker-inc", ".system_generated", "logs", "transcript.jsonl");
+    const allowed = new Set(["worker-inc"]);
+    const iso = new Date().toISOString();
+
+    // 1. Missing file before worker writes first line
+    const empty = readChildTranscript(brain, allowed, "worker-inc", 60);
+    assert.ok(empty);
+    assert.equal(empty.totalSteps, 0);
+    assert.equal(empty.cursor, 0);
+    assert.equal(empty.mode, "full");
+
+    // 2. Initial 2 lines written
+    writeJsonl(txPath, [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: iso, content: "检查任务" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: iso, model: "gemini-4-neon-xhigh", content: "开始处理" },
+    ]);
+    const full = readChildTranscript(brain, allowed, "worker-inc", 60);
+    assert.ok(full);
+    assert.equal(full.mode, "full");
+    assert.equal(full.unchanged, false);
+    assert.equal(full.steps.length, 2);
+    assert.equal(full.cursor, 2);
+
+    // 3. Re-query with afterCursor=2 when file unchanged -> delta + unchanged=true + 0 steps
+    const same = readChildTranscript(brain, allowed, "worker-inc", 60, full.cursor);
+    assert.ok(same);
+    assert.equal(same.mode, "delta");
+    assert.equal(same.unchanged, true);
+    assert.equal(same.steps.length, 0);
+    assert.equal(same.cursor, 2);
+
+    // 4. Append a partial UTF-8 JSON line (no newline yet) -> should NOT crash or corrupt
+    const thirdRow = JSON.stringify({
+      step_index: 3,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: iso,
+      content: "中文增量回复内容完成",
+    });
+    const halfBuf = Buffer.from(thirdRow + "\n", "utf8");
+    const splitAt = Math.floor(halfBuf.length / 2);
+    appendFileSync(txPath, halfBuf.subarray(0, splitAt));
+    const partial = readChildTranscript(brain, allowed, "worker-inc", 60, full.cursor);
+    assert.ok(partial);
+    assert.equal(partial.mode, "delta");
+    assert.equal(partial.steps.length, 0);
+    assert.equal(partial.cursor, 2);
+
+    // 5. Append remaining bytes -> delta returns ONLY the new step 3 with intact Chinese UTF-8
+    appendFileSync(txPath, halfBuf.subarray(splitAt));
+    const delta = readChildTranscript(brain, allowed, "worker-inc", 60, full.cursor);
+    assert.ok(delta);
+    assert.equal(delta.mode, "delta");
+    assert.equal(delta.unchanged, false);
+    assert.equal(delta.steps.length, 1);
+    assert.equal(delta.steps[0]?.stepIndex, 3);
+    assert.equal(delta.steps[0]?.summary, "中文增量回复内容完成");
+    assert.equal(delta.cursor, 3);
+    assert.equal(delta.totalSteps, 3);
+  } finally {
+    clearTranscriptCache();
     rmSync(homeDir, { recursive: true, force: true });
   }
 });

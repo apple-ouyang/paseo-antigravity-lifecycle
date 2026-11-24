@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import {
@@ -20,15 +20,20 @@ import {
 } from "../shared/rpc.ts";
 import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
 import {
+  applyChildTranscriptResponse,
   consumeConsoleNavRequest,
+  getChildTranscriptCache,
+  getConsoleDetailCache,
   getConsoleNavRequest,
   getStatusSnapshot,
+  setConsoleDetailCache,
   subscribeConsoleNav,
   subscribeStatus,
   type SelectedChildTarget,
 } from "./store.ts";
 
 type ConsoleTab = "overview" | "board" | "members" | "tree";
+type ChildFetchState = "loading" | "syncing" | "ready" | "error";
 
 type SelectedChild = SelectedChildTarget;
 
@@ -480,8 +485,10 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     () => null,
   );
 
-  const [detail, setDetail] = useState<AgyConsoleDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [detail, setDetail] = useState<AgyConsoleDetail | null>(() =>
+    agentId ? getConsoleDetailCache(agentId) : null,
+  );
+  const [loading, setLoading] = useState(() => !(agentId && getConsoleDetailCache(agentId)));
   const [tab, setTab] = useState<ConsoleTab>("overview");
   const [tabInitialized, setTabInitialized] = useState(false);
 
@@ -506,26 +513,52 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   // Teamwork / subagent tree controls (default hides completed!)
   const [showCompletedTree, setShowCompletedTree] = useState(false);
 
-  // Child transcript drill-down
-  const [selectedChild, setSelectedChild] = useState<SelectedChild | null>(() => {
+  // Child transcript drill-down with persistent client cache + incremental delta updates
+  const initialSelectedChild = useMemo(() => {
     const req = agentId ? getConsoleNavRequest(agentId) : null;
     return req && req.target.kind === "child" ? req.target.child : null;
-  });
-  const [childSteps, setChildSteps] = useState<TranscriptStep[]>([]);
-  const [childModel, setChildModel] = useState<string | null>(null);
-  const [childTotal, setChildTotal] = useState(0);
-  const [childLoading, setChildLoading] = useState(false);
+  }, [agentId]);
+
+  const initialChildCache = initialSelectedChild
+    ? getChildTranscriptCache(initialSelectedChild.conversationId)
+    : null;
+
+  const [selectedChild, setSelectedChild] = useState<SelectedChild | null>(initialSelectedChild);
+  const [childSteps, setChildSteps] = useState<TranscriptStep[]>(() => initialChildCache?.steps ?? []);
+  const [childModel, setChildModel] = useState<string | null>(() => initialChildCache?.model ?? null);
+  const [childTotal, setChildTotal] = useState<number>(() => initialChildCache?.totalSteps ?? 0);
+  const [childLoadedOnce, setChildLoadedOnce] = useState<boolean>(
+    () => Boolean(initialChildCache?.loadedOnce),
+  );
+  const [childFetchState, setChildFetchState] = useState<ChildFetchState>(() =>
+    initialSelectedChild
+      ? initialChildCache?.loadedOnce
+        ? "syncing"
+        : "loading"
+      : "ready",
+  );
   const [childNewestFirst, setChildNewestFirst] = useState(true);
   const [childReplyText, setChildReplyText] = useState("");
   const [childSending, setChildSending] = useState(false);
   const [childSendFeedback, setChildSendFeedback] = useState<string | null>(null);
+  const childReqSeqRef = useRef(0);
+  const childRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const childRetryCountRef = useRef(0);
 
   const selectChild = useCallback((next: SelectedChild) => {
+    if (childRetryTimerRef.current) {
+      clearTimeout(childRetryTimerRef.current);
+      childRetryTimerRef.current = null;
+    }
+    childRetryCountRef.current = 0;
+    const cached = getChildTranscriptCache(next.conversationId);
     setSelectedChild((prev) => {
       if (prev?.conversationId !== next.conversationId) {
-        setChildSteps([]);
-        setChildModel(null);
-        setChildTotal(0);
+        setChildSteps(cached?.steps ?? []);
+        setChildModel(cached?.model ?? null);
+        setChildTotal(cached?.totalSteps ?? 0);
+        setChildLoadedOnce(Boolean(cached?.loadedOnce));
+        setChildFetchState(cached?.loadedOnce ? "syncing" : "loading");
         setChildSendFeedback(null);
       }
       return next;
@@ -557,6 +590,9 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     if (!agentId) return;
     try {
       const next = await fetchConsole({ agentId, boardLimit: 200 });
+      if (next) {
+        setConsoleDetailCache(agentId, next);
+      }
       setDetail(next);
     } catch {
       // Keep previous snapshot on transient RPC failure.
@@ -595,50 +631,115 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   }, [status, tabInitialized]);
 
   const loadChild = useCallback(
-    async (child: SelectedChild) => {
-      setChildLoading(true);
+    async (child: SelectedChild, options?: { full?: boolean }) => {
+      if (!agentId) return;
+      const reqSeq = ++childReqSeqRef.current;
+      const cached = getChildTranscriptCache(child.conversationId);
+      const useDelta = !options?.full && Boolean(cached?.loadedOnce);
+      setChildFetchState(cached?.loadedOnce ? "syncing" : "loading");
+
       try {
         const res = await fetchChildTranscript({
           agentId,
           conversationId: child.conversationId,
-          limit: 60,
+          limit: 80,
+          afterCursor: useDelta ? cached!.cursor : undefined,
         });
+        if (reqSeq !== childReqSeqRef.current) return;
+
         if (res) {
-          setChildSteps(res.steps);
-          setChildModel(res.model);
-          setChildTotal(res.totalSteps);
+          const merged = applyChildTranscriptResponse(res);
+          childRetryCountRef.current = 0;
+          setChildSteps(merged.steps);
+          setChildModel(merged.model);
+          setChildTotal(merged.totalSteps);
+          setChildLoadedOnce(true);
+          setChildFetchState("ready");
+          return;
+        }
+
+        // Server returned null transiently (e.g. session lookup still warming up)
+        if (cached?.loadedOnce) {
+          setChildFetchState("ready");
+        } else if (childRetryCountRef.current < 2) {
+          childRetryCountRef.current += 1;
+          setChildFetchState("loading");
+          childRetryTimerRef.current = setTimeout(() => {
+            if (reqSeq === childReqSeqRef.current) {
+              void loadChild(child, { full: true });
+            }
+          }, 1_500);
+        } else {
+          setChildFetchState("error");
         }
       } catch {
-        // Ignore transient failure
-      } finally {
-        setChildLoading(false);
+        if (reqSeq !== childReqSeqRef.current) return;
+        if (cached?.loadedOnce) {
+          setChildFetchState("ready");
+        } else if (childRetryCountRef.current < 2) {
+          childRetryCountRef.current += 1;
+          setChildFetchState("loading");
+          childRetryTimerRef.current = setTimeout(() => {
+            if (reqSeq === childReqSeqRef.current) {
+              void loadChild(child, { full: true });
+            }
+          }, 1_500);
+        } else {
+          setChildFetchState("error");
+        }
       }
     },
     [agentId, fetchChildTranscript],
   );
 
-  const selectedChildRunning = useMemo(() => {
-    if (!selectedChild) return false;
+  const selectedChildState = useMemo(() => {
+    if (!selectedChild) return { running: false, live: false };
     const matchedMember = (swarm?.members ?? []).find(
       (m) => m.conversationId === selectedChild.conversationId,
     );
-    if (matchedMember) return matchedMember.state === "working";
+    if (matchedMember) {
+      const running = matchedMember.state === "working";
+      const live = running || (matchedMember.state === "waiting" && !matchedMember.delivered);
+      return { running, live };
+    }
     const matchedTw = (teamwork?.nodes ?? []).find((n) => n.id === selectedChild.conversationId);
-    if (matchedTw) return matchedTw.state === "running";
+    if (matchedTw) {
+      const running = matchedTw.state === "running";
+      return { running, live: running };
+    }
     const matchedSub = subagents.find((s) => s.id === selectedChild.conversationId);
-    if (matchedSub) return matchedSub.state === "running";
-    return selectedChild.running;
+    if (matchedSub) {
+      const running = matchedSub.state === "running";
+      return { running, live: running };
+    }
+    return { running: selectedChild.running, live: selectedChild.running };
   }, [selectedChild, swarm, teamwork, subagents]);
+
+  const selectedChildRunning = selectedChildState.running;
+  const selectedChildLive = selectedChildState.live;
 
   useEffect(() => {
     if (!selectedChild) return;
     void loadChild(selectedChild);
-    if (!selectedChildRunning) return;
+    if (!selectedChildLive) {
+      return () => {
+        if (childRetryTimerRef.current) {
+          clearTimeout(childRetryTimerRef.current);
+          childRetryTimerRef.current = null;
+        }
+      };
+    }
     const timer = setInterval(() => {
       void loadChild(selectedChild);
     }, 3_000);
-    return () => clearInterval(timer);
-  }, [selectedChild, selectedChildRunning, loadChild]);
+    return () => {
+      clearInterval(timer);
+      if (childRetryTimerRef.current) {
+        clearTimeout(childRetryTimerRef.current);
+        childRetryTimerRef.current = null;
+      }
+    };
+  }, [selectedChild, selectedChildLive, loadChild]);
 
   // Partition Swarm members just like official hive.js (exclude role workers monitor/narrator from task team)
   const swarmPartitions = useMemo(() => {
@@ -838,10 +939,24 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                 theme={theme}
                 onPress={() => setChildNewestFirst((v) => !v)}
               />
-              {selectedChildRunning ? (
-                <Text style={{ color: theme.colors.statusSuccess, fontSize: 11, fontWeight: "600" }}>
-                  ● 实时 (3s)
+              {childFetchState === "loading" ? (
+                <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
+                  加载中…
                 </Text>
+              ) : childFetchState === "syncing" ? (
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                  增量同步中…
+                </Text>
+              ) : selectedChildRunning ? (
+                <Text style={{ color: theme.colors.statusSuccess, fontSize: 11, fontWeight: "600" }}>
+                  ● 实时增量 (3s)
+                </Text>
+              ) : selectedChildLive ? (
+                <Text style={{ color: theme.colors.statusWarning, fontSize: 11, fontWeight: "600" }}>
+                  ● 待命监听 (3s)
+                </Text>
+              ) : childLoadedOnce ? (
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>已缓存</Text>
               ) : null}
               <Pressable onPress={() => void loadChild(selectedChild)}>
                 <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>刷新</Text>
@@ -892,10 +1007,55 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         </View>
 
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }}>
-          {childLoading && childSteps.length === 0 ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>加载对话与执行日志中…</Text>
+          {!childLoadedOnce && childSteps.length === 0 && childFetchState !== "error" ? (
+            <View
+              style={{
+                backgroundColor: theme.colors.surface1,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                borderRadius: 9,
+                padding: 14,
+                gap: 4,
+              }}
+            >
+              <Text style={{ color: theme.colors.accent, fontSize: 13, fontWeight: "600" }}>
+                正在加载 {selectedChild.label} 的对话与执行日志…
+              </Text>
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                首次读取后会自动缓存，后续切换与刷新仅拉取增量步骤。
+              </Text>
+            </View>
+          ) : childFetchState === "error" && childSteps.length === 0 ? (
+            <View
+              style={{
+                backgroundColor: theme.colors.surface1,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                borderRadius: 9,
+                padding: 14,
+                gap: 8,
+              }}
+            >
+              <Text style={{ color: theme.colors.statusWarning, fontSize: 12, fontWeight: "600" }}>
+                暂时未能读取到 {selectedChild.label} 的对话日志
+              </Text>
+              <Pressable
+                onPress={() => {
+                  childRetryCountRef.current = 0;
+                  void loadChild(selectedChild, { full: true });
+                }}
+              >
+                <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "600" }}>
+                  点击重新加载 →
+                </Text>
+              </Pressable>
+            </View>
           ) : orderedSteps.length === 0 ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>暂无对话与步骤记录</Text>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+              {selectedChildLive
+                ? `${selectedChild.label} 已启动，正在等待首条对话与步骤写入（每 3s 自动增量检查）…`
+                : "暂无对话与步骤记录"}
+            </Text>
           ) : (
             orderedSteps.map((step, idx) => (
               <View

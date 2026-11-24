@@ -280,7 +280,8 @@ export const agyChildTranscriptGet = defineRpc({
   input: z.object({
     agentId: z.string().min(1),
     conversationId: z.string().min(1),
-    limit: z.number().int().min(1).max(100).optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+    afterCursor: z.number().int().min(0).optional(),
   }),
   output: z
     .object({
@@ -288,9 +289,16 @@ export const agyChildTranscriptGet = defineRpc({
       model: z.string().nullable(),
       steps: z.array(TranscriptStepSchema),
       totalSteps: z.number().int(),
+      cursor: z.number().int(),
+      mode: z.enum(["full", "delta"]),
+      unchanged: z.boolean(),
     })
     .nullable(),
 });
+
+export type ChildTranscriptResponse = NonNullable<
+  z.infer<typeof agyChildTranscriptGet.output>
+>;
 
 export type AgyMode = z.infer<typeof AgyModeSchema>;
 export type AgyPrimaryMode = z.infer<typeof AgyPrimaryModeSchema>;
