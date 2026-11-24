@@ -20,7 +20,8 @@ export interface SelectedChildTarget {
 
 export interface SwarmSendResult {
   ok: boolean;
-  method: "agentapi" | "paseo_send";
+  method: "agentapi" | "hook_inbox" | "paseo_send";
+  pendingCount?: number;
   error?: string;
 }
 

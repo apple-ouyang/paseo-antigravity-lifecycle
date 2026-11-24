@@ -1,5 +1,15 @@
 import { execFile } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -1076,15 +1086,89 @@ export function formatCoordinatorMessagePayload(
   };
 }
 
+export const COORDINATOR_INBOX_FILENAME = "paseo-inbox.jsonl";
+
+export function enqueueCoordinatorHookInboxMessage(input: {
+  brainRoot: string;
+  sessionId: string;
+  text: string;
+  targetMember?: string;
+  now?: number;
+}): { ok: boolean; inboxPath?: string; pendingCount?: number; error?: string } {
+  const { brainRoot, sessionId, text, targetMember } = input;
+  if (!sessionId || sessionId.includes("/") || sessionId.includes("..")) {
+    return { ok: false, error: "Invalid coordinator sessionId" };
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { ok: false, error: "Message text is empty" };
+  }
+  const { title, body } = formatCoordinatorMessagePayload(trimmed, targetMember);
+  const logsDir = path.join(brainRoot, sessionId, ".system_generated", "logs");
+  const inboxPath = path.join(logsDir, COORDINATOR_INBOX_FILENAME);
+  try {
+    mkdirSync(logsDir, { recursive: true });
+    const record = {
+      id: randomUUID(),
+      ts: input.now ?? Date.now(),
+      title,
+      targetMember: targetMember?.trim() || "coordinator",
+      body,
+    };
+    appendFileSync(inboxPath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+    let pendingCount = 1;
+    try {
+      const content = readFileSync(inboxPath, "utf8");
+      pendingCount = content
+        .split("\n")
+        .filter((line) => line.trim().length > 0).length;
+    } catch {
+      pendingCount = 1;
+    }
+    return { ok: true, inboxPath, pendingCount };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function extractAgentApiError(err: unknown): string {
+  if (err && typeof err === "object") {
+    const stdout =
+      "stdout" in err && typeof (err as { stdout?: unknown }).stdout === "string"
+        ? (err as { stdout: string }).stdout.trim()
+        : "";
+    if (stdout) {
+      try {
+        const parsed = JSON.parse(stdout) as { error?: unknown };
+        if (typeof parsed.error === "string" && parsed.error.trim()) {
+          return parsed.error.trim();
+        }
+      } catch {
+        // non-JSON stdout
+      }
+    }
+    const stderr =
+      "stderr" in err && typeof (err as { stderr?: unknown }).stderr === "string"
+        ? (err as { stderr: string }).stderr.trim()
+        : "";
+    if (stderr) return stderr.slice(0, 240);
+  }
+  return err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240);
+}
+
 export async function sendCoordinatorMessageViaAgentApi(input: {
   sessionId: string;
   text: string;
   targetMember?: string;
   homeDir?: string;
+  env?: NodeJS.ProcessEnv;
   runner?: (
     file: string,
     args: string[],
-    options: { timeout: number; maxBuffer: number },
+    options: { timeout: number; maxBuffer: number; env: NodeJS.ProcessEnv },
   ) => Promise<{ stdout: string; stderr: string }>;
 }): Promise<{ ok: boolean; error?: string }> {
   const { sessionId, text, targetMember } = input;
@@ -1095,23 +1179,36 @@ export async function sendCoordinatorMessageViaAgentApi(input: {
   if (!trimmed) {
     return { ok: false, error: "Message text is empty" };
   }
+
+  const env = input.env ?? process.env;
+  const lsAddress = env.ANTIGRAVITY_LS_ADDRESS?.trim();
+  const csrfToken = env.ANTIGRAVITY_CSRF_TOKEN?.trim();
+  if (!lsAddress || !csrfToken) {
+    return { ok: false, error: "ANTIGRAVITY_LS_ADDRESS is not set" };
+  }
+
+  const homeDir = input.homeDir ?? homedir();
   const { title, body } = formatCoordinatorMessagePayload(trimmed, targetMember);
-  const agyBin = resolveAgyBinaryPath(input.homeDir);
+  const agyBin = resolveAgyBinaryPath(homeDir);
   const args = ["agentapi", "send-message", `--title=${title}`, sessionId, body];
   const run =
     input.runner ??
     ((file, argv, opts) => execFileAsync(file, argv, { ...opts, encoding: "utf8" }));
 
   try {
-    await run(agyBin, args, { timeout: 15_000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await run(agyBin, args, { timeout: 15_000, maxBuffer: 1024 * 1024, env });
+    if (stdout?.trim()) {
+      try {
+        const parsed = JSON.parse(stdout) as { error?: unknown };
+        if (typeof parsed.error === "string" && parsed.error.trim()) {
+          return { ok: false, error: parsed.error.trim() };
+        }
+      } catch {
+        // non-JSON output is fine on exit 0
+      }
+    }
     return { ok: true };
   } catch (err: unknown) {
-    const msg =
-      err && typeof err === "object" && "stderr" in err && typeof (err as { stderr?: unknown }).stderr === "string" && (err as { stderr: string }).stderr.trim()
-        ? (err as { stderr: string }).stderr.trim()
-        : err instanceof Error
-          ? err.message
-          : String(err);
-    return { ok: false, error: msg };
+    return { ok: false, error: extractAgentApiError(err) };
   }
 }

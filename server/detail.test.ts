@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  COORDINATOR_INBOX_FILENAME,
   clearTranscriptCache,
   collectAllowedChildIds,
+  enqueueCoordinatorHookInboxMessage,
   formatCoordinatorMessagePayload,
   inspectAgyConsole,
   readChildStepDetail,
@@ -757,34 +759,107 @@ test("readChildStepDetail renders structured edit_file LCS diff, write_file line
   }
 });
 
-test("sendCoordinatorMessageViaAgentApi delivers non-interrupting messages to coordinator via agentapi", async () => {
-  const calls: Array<{ file: string; args: string[] }> = [];
-  const res1 = await sendCoordinatorMessageViaAgentApi({
-    sessionId: "0abf5d68-0fb5-467e-b0ec-0bdf0441ff14",
-    text: "11篇论文已经拆分完毕，基于最新版改",
-    targetMember: "coordinator",
-    runner: async (file, args) => {
-      calls.push({ file, args });
-      return { stdout: "ok", stderr: "" };
-    },
-  });
-  assert.equal(res1.ok, true);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.args[0], "agentapi");
-  assert.equal(calls[0]?.args[1], "send-message");
-  assert.equal(calls[0]?.args[3], "0abf5d68-0fb5-467e-b0ec-0bdf0441ff14");
-  assert.ok(calls[0]?.args[4]?.includes("11篇论文已经拆分完毕"));
-  assert.ok(calls[0]?.args[4]?.includes("@coordinator"));
+test("enqueueCoordinatorHookInboxMessage queues non-interrupting coordinator directives safely", () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-inbox-"));
+  try {
+    const brain = path.join(homeDir, ".gemini", "antigravity-cli", "brain");
+    const coordId = "0abf5d68-0fb5-467e-b0ec-0bdf0441ff14";
 
-  const relayed = formatCoordinatorMessagePayload("先核对第3节", "s4-gamma-bridge");
-  assert.ok(relayed.title.includes("@s4-gamma-bridge"));
-  assert.ok(relayed.body.includes("@s4-gamma-bridge"));
-  assert.ok(relayed.body.includes("@coordinator"));
+    const first = enqueueCoordinatorHookInboxMessage({
+      brainRoot: brain,
+      sessionId: coordId,
+      text: "现在啥情况了？总结下",
+      targetMember: "coordinator",
+      now: 1795559000000,
+    });
+    assert.equal(first.ok, true);
+    assert.equal(first.pendingCount, 1);
+    assert.ok(first.inboxPath?.endsWith(COORDINATOR_INBOX_FILENAME));
 
-  // Rejects path-traversal sessionIds
-  const bad = await sendCoordinatorMessageViaAgentApi({
-    sessionId: "../evil",
-    text: "hi",
-  });
-  assert.equal(bad.ok, false);
+    const second = enqueueCoordinatorHookInboxMessage({
+      brainRoot: brain,
+      sessionId: coordId,
+      text: "先核对第3节",
+      targetMember: "s4-gamma-bridge",
+      now: 1795559001000,
+    });
+    assert.equal(second.ok, true);
+    assert.equal(second.pendingCount, 2);
+
+    const lines = readFileSync(first.inboxPath!, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { body: string; targetMember: string });
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0]?.targetMember, "coordinator");
+    assert.ok(lines[0]?.body.includes("@coordinator"));
+    assert.ok(lines[0]?.body.includes("现在啥情况了？总结下"));
+    assert.equal(lines[1]?.targetMember, "s4-gamma-bridge");
+    assert.ok(lines[1]?.body.includes("@s4-gamma-bridge"));
+
+    const bad = enqueueCoordinatorHookInboxMessage({
+      brainRoot: brain,
+      sessionId: "../evil",
+      text: "hi",
+    });
+    assert.equal(bad.ok, false);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("sendCoordinatorMessageViaAgentApi uses env credentials when present and rejects cleanly when absent", async () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-agentapi-"));
+  try {
+    const coordId = "0abf5d68-0fb5-467e-b0ec-0bdf0441ff14";
+
+    // Without ANTIGRAVITY_LS_ADDRESS / ANTIGRAVITY_CSRF_TOKEN -> fails cleanly without spawning CLI
+    const missingEnv = await sendCoordinatorMessageViaAgentApi({
+      sessionId: coordId,
+      text: "hi",
+      homeDir,
+      env: {},
+    });
+    assert.equal(missingEnv.ok, false);
+    assert.ok(missingEnv.error?.includes("ANTIGRAVITY_LS_ADDRESS"));
+
+    const calls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const res1 = await sendCoordinatorMessageViaAgentApi({
+      sessionId: coordId,
+      text: "11篇论文已经拆分完毕，基于最新版改",
+      targetMember: "coordinator",
+      homeDir,
+      env: {
+        ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:54321",
+        ANTIGRAVITY_CSRF_TOKEN: "csrf-unit-test",
+      },
+      runner: async (file, args, opts) => {
+        calls.push({ file, args, env: opts.env });
+        return { stdout: '{"response":{"sendMessage":{}}}', stderr: "" };
+      },
+    });
+    assert.equal(res1.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.args[0], "agentapi");
+    assert.equal(calls[0]?.args[1], "send-message");
+    assert.equal(calls[0]?.args[3], coordId);
+    assert.ok(calls[0]?.args[4]?.includes("11篇论文已经拆分完毕"));
+    assert.ok(calls[0]?.args[4]?.includes("@coordinator"));
+    assert.equal(calls[0]?.env.ANTIGRAVITY_LS_ADDRESS, "127.0.0.1:54321");
+
+    const relayed = formatCoordinatorMessagePayload("先核对第3节", "s4-gamma-bridge");
+    assert.ok(relayed.title.includes("@s4-gamma-bridge"));
+    assert.ok(relayed.body.includes("@s4-gamma-bridge"));
+    assert.ok(relayed.body.includes("@coordinator"));
+
+    const bad = await sendCoordinatorMessageViaAgentApi({
+      sessionId: "../evil",
+      text: "hi",
+      homeDir,
+      env: { ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:1", ANTIGRAVITY_CSRF_TOKEN: "x" },
+    });
+    assert.equal(bad.ok, false);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
 });

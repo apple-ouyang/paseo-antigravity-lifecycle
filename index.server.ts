@@ -5,6 +5,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
   clearTranscriptCache,
   collectAllowedChildIds,
+  enqueueCoordinatorHookInboxMessage,
   formatCoordinatorMessagePayload,
   inspectAgyConsole,
   readChildStepDetail,
@@ -328,35 +329,62 @@ export default function contribute(server: PluginServerContext) {
       knownSessions,
     );
     if (!resolved) {
-      return { ok: false, method: "agentapi" as const, error: "未找到对应的 Antigravity 协调者会话" };
+      return { ok: false, method: "hook_inbox" as const, error: "未找到对应的 Antigravity 协调者会话" };
     }
 
-    // 1. Always try non-interrupting `agy agentapi send-message` to @coordinator first
-    // so running Swarm workers / subagents are NEVER force-cancelled by ACP `session/cancel`.
-    const viaAgentApi = await sendCoordinatorMessageViaAgentApi({
-      sessionId: resolved.sessionId,
-      text,
-      targetMember,
-    });
-    if (viaAgentApi.ok) {
-      return { ok: true, method: "agentapi" as const };
+    // 1. If the plugin environment already exposes AGY LS credentials, use instant out-of-band agentapi.
+    if (process.env.ANTIGRAVITY_LS_ADDRESS?.trim() && process.env.ANTIGRAVITY_CSRF_TOKEN?.trim()) {
+      const viaAgentApi = await sendCoordinatorMessageViaAgentApi({
+        sessionId: resolved.sessionId,
+        text,
+        targetMember,
+      });
+      if (viaAgentApi.ok) {
+        return { ok: true, method: "agentapi" as const };
+      }
     }
 
-    // 2. Only fall back to Paseo's normal send() when NO background Swarm/subagent work is running,
-    // because Paseo's send() interrupts an active foreground turn (`session/cancel`).
     const status = inspectAgySession({
       agentId: resolved.agentId,
       sessionId: resolved.sessionId,
       agentAlive: resolved.agentAlive,
     });
-    if (status?.backgroundActive) {
+    const currentAgent = context.paseo.agents.ref(agentId).current();
+    const paseoRunning = currentAgent?.status === "running";
+
+    // 2. When background Swarm/subagents are active OR the Paseo turn is currently running,
+    // NEVER call Paseo's interrupting send() (`session/cancel` force-stops all Swarm workers!).
+    // Deliver via AGY's official lifecycle hook inbox (`PreInvocation`/`PostInvocation`/`Stop`
+    // injectSteps / continue), which injects directly into @coordinator without cancelling workers.
+    if (status?.backgroundActive || paseoRunning) {
+      try {
+        ensureAntigravityHooksInstalled();
+      } catch (error) {
+        console.error(
+          `[antigravity-lifecycle] swarm.send hook check failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const queued = enqueueCoordinatorHookInboxMessage({
+        brainRoot,
+        sessionId: resolved.sessionId,
+        text,
+        targetMember,
+      });
+      if (queued.ok) {
+        return {
+          ok: true,
+          method: "hook_inbox" as const,
+          pendingCount: queued.pendingCount,
+        };
+      }
       return {
         ok: false,
-        method: "agentapi" as const,
-        error: `非中断直达协调者失败（已阻止中断正在运行的 Swarm 成员）：${viaAgentApi.error ?? "unknown error"}`,
+        method: "hook_inbox" as const,
+        error: `非中断收件箱写入失败：${queued.error ?? "unknown error"}`,
       };
     }
 
+    // 3. Session is genuinely idle with no active background work -> start a normal turn cleanly.
     try {
       const { body } = formatCoordinatorMessagePayload(text, targetMember);
       await context.paseo.agents.ref(agentId).send(body);

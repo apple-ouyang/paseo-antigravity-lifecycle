@@ -70,17 +70,45 @@ export function resolveHookPaths(options: AntigravityHookInstallOptions = {}): {
 
 export function buildAntigravityHookScript(): string {
   return `#!/usr/bin/env node
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
 const fallbackEvent = process.argv[2] || process.env.PASEO_ANTIGRAVITY_EVENT || "";
+const INBOX_FILENAME = "paseo-inbox.jsonl";
 
-function respondStdout(eventName) {
-  if (eventName === "Stop") {
-    process.stdout.write('{"decision":""}\\n');
-  } else {
-    process.stdout.write("{}\\n");
+function drainInboxMessages(logsDir) {
+  const inboxPath = path.join(logsDir, INBOX_FILENAME);
+  const claimPath = \`\${inboxPath}.\${process.pid}.\${Date.now()}.claiming\`;
+  try {
+    renameSync(inboxPath, claimPath);
+  } catch {
+    return [];
+  }
+  try {
+    const rawText = readFileSync(claimPath, "utf8");
+    const messages = [];
+    for (const line of rawText.split("\\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed.body === "string" && parsed.body.trim()) {
+          messages.push(parsed.body.trim());
+        }
+      } catch {
+        // Ignore malformed JSONL inbox line.
+      }
+    }
+    return messages;
+  } catch {
+    return [];
+  } finally {
+    try {
+      rmSync(claimPath, { force: true });
+    } catch {
+      // Ignore cleanup errors.
+    }
   }
 }
 
@@ -102,41 +130,79 @@ process.stdin.on("end", () => {
     typeof payload.hookEventName === "string" && payload.hookEventName.length > 0
       ? payload.hookEventName
       : fallbackEvent;
-  respondStdout(event);
+
+  const conversationId =
+    typeof payload.conversationId === "string" && payload.conversationId.length > 0
+      ? payload.conversationId
+      : null;
+  const transcriptPath =
+    typeof payload.transcriptPath === "string" && payload.transcriptPath.length > 0
+      ? payload.transcriptPath
+      : null;
+  const logsDir = transcriptPath
+    ? path.dirname(transcriptPath)
+    : conversationId
+      ? path.join(
+          homedir(),
+          ".gemini",
+          "antigravity-cli",
+          "brain",
+          conversationId,
+          ".system_generated",
+          "logs",
+        )
+      : null;
+
+  let drained = [];
+  const isUserCanceled = payload.terminationReason === "USER_CANCELED";
+  if (
+    logsDir &&
+    (event === "PreInvocation" ||
+      event === "PostInvocation" ||
+      (event === "Stop" && !isUserCanceled))
+  ) {
+    try {
+      drained = drainInboxMessages(logsDir);
+    } catch {
+      drained = [];
+    }
+  }
+
+  let responseObj;
+  if (event === "Stop") {
+    responseObj =
+      drained.length > 0
+        ? { decision: "continue", reason: drained.join("\\n\\n") }
+        : { decision: "" };
+  } else if (event === "PreInvocation" && drained.length > 0) {
+    responseObj = {
+      injectSteps: drained.map((body) => ({ userMessage: body })),
+    };
+  } else if (event === "PostInvocation" && drained.length > 0) {
+    responseObj = {
+      injectSteps: drained.map((body) => ({ userMessage: body })),
+      terminationBehavior: "force_continue",
+    };
+  } else {
+    responseObj = {};
+  }
+  process.stdout.write(\`\${JSON.stringify(responseObj)}\\n\`);
 
   try {
-    const conversationId =
-      typeof payload.conversationId === "string" && payload.conversationId.length > 0
-        ? payload.conversationId
-        : null;
-    const transcriptPath =
-      typeof payload.transcriptPath === "string" && payload.transcriptPath.length > 0
-        ? payload.transcriptPath
-        : null;
-    const logsDir = transcriptPath
-      ? path.dirname(transcriptPath)
-      : conversationId
-        ? path.join(
-            homedir(),
-            ".gemini",
-            "antigravity-cli",
-            "brain",
-            conversationId,
-            ".system_generated",
-            "logs",
-          )
-        : null;
-    if (!logsDir || (event !== "PreInvocation" && event !== "Stop")) {
+    if (!logsDir || (event !== "PreInvocation" && event !== "PostInvocation" && event !== "Stop")) {
       return;
     }
     mkdirSync(logsDir, { recursive: true });
     const now = Date.now();
     const envPid = Number(process.env.PASEO_HOOK_AGENT_PID || "");
     const pid = Number.isInteger(envPid) && envPid > 1 ? envPid : (typeof process.ppid === "number" && process.ppid > 1 ? process.ppid : null);
-    const writeJsonAtomic = (filename, data) => {
+    const writeJsonAtomic = (filename, data, mode) => {
       const target = path.join(logsDir, filename);
       const tmp = \`\${target}.\${process.pid}.tmp\`;
       writeFileSync(tmp, \`\${JSON.stringify(data)}\\n\`, "utf8");
+      if (mode !== undefined) {
+        chmodSync(tmp, mode);
+      }
       try {
         renameSync(tmp, target);
       } catch (err) {
@@ -144,6 +210,9 @@ process.stdin.on("end", () => {
         throw err;
       }
     };
+    if (event === "PostInvocation") {
+      return;
+    }
     if (pid !== null) {
       writeJsonAtomic("process.json", {
         conversationId,
@@ -158,7 +227,7 @@ process.stdin.on("end", () => {
     const state = {
       conversationId,
       event: "Stop",
-      fullyIdle: payload.fullyIdle === false ? false : true,
+      fullyIdle: drained.length > 0 ? false : (payload.fullyIdle === false ? false : true),
       ...(pid !== null ? { pid } : {}),
       ts: now,
     };

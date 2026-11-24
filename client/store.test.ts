@@ -315,12 +315,13 @@ test("resolveCoordinatorChildFromStatus and sendSwarmMessage target @coordinator
   const sent: Array<{ agentId: string; text: string; targetMember?: string }> = [];
   setSendSwarmMessageHandler(async (agentId, text, targetMember) => {
     sent.push({ agentId, text, targetMember });
-    return { ok: true, method: "agentapi" };
+    return { ok: true, method: "hook_inbox", pendingCount: 1 };
   });
   try {
     const res = await sendSwarmMessage("a-coord", "11篇论文已拆完", "coordinator");
     assert.equal(res.ok, true);
-    assert.equal(res.method, "agentapi");
+    assert.equal(res.method, "hook_inbox");
+    assert.equal(res.pendingCount, 1);
     assert.deepEqual(sent, [{ agentId: "a-coord", text: "11篇论文已拆完", targetMember: "coordinator" }]);
   } finally {
     setSendSwarmMessageHandler(null);

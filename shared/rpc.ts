@@ -367,7 +367,8 @@ export const agySwarmSendMessage = defineRpc({
   }),
   output: z.object({
     ok: z.boolean(),
-    method: z.enum(["agentapi", "paseo_send"]),
+    method: z.enum(["agentapi", "hook_inbox", "paseo_send"]),
+    pendingCount: z.number().int().optional(),
     error: z.string().optional(),
   }),
 });

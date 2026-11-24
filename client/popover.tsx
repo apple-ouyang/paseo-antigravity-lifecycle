@@ -105,7 +105,11 @@ function StatusContent({
       setCoordFeedback(
         res.method === "agentapi"
           ? "✓ 已直达 @coordinator（未打断运行中的进程）"
-          : "✓ 已发送给 @coordinator",
+          : res.method === "hook_inbox"
+            ? status.coordinatorState === "wakeup_running"
+              ? "✓ 已投递给 @coordinator（下一步自动注入，不打断 Swarm 成员）"
+              : "✓ 已投递到 @coordinator 非中断收件箱（协调者下次唤醒时注入，不打断 Swarm 成员）"
+            : "✓ 已发送给 @coordinator",
       );
     } else {
       setCoordFeedback(`发送失败：${res.error ?? "未知错误"}`);

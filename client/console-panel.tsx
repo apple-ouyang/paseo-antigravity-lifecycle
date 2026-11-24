@@ -1698,11 +1698,16 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
       });
       if (res.ok) {
         setChildReplyText("");
-        const suffix = res.method === "agentapi" ? "（未打断运行中的进程）" : "";
+        const suffix =
+          res.method === "agentapi"
+            ? "（未打断运行中的进程）"
+            : res.method === "hook_inbox"
+              ? "（非中断收件箱：协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
+              : "";
         setChildSendFeedback(
           memberName === "coordinator"
-            ? `✓ 已直达 @coordinator${suffix}`
-            : `✓ 已发给 @coordinator 转达给 @${memberName}${suffix}`,
+            ? `✓ 已投递给 @coordinator${suffix}`
+            : `✓ 已投递给 @coordinator 转达给 @${memberName}${suffix}`,
         );
       } else {
         setChildSendFeedback(`发送失败：${res.error ?? "未知错误"}`);
@@ -1730,7 +1735,9 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         setOverviewCoordFeedback(
           res.method === "agentapi"
             ? "✓ 已直达 @coordinator（未打断运行中的 Swarm 成员）"
-            : "✓ 已发送给 @coordinator",
+            : res.method === "hook_inbox"
+              ? "✓ 已投递到 @coordinator 非中断收件箱（协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
+              : "✓ 已发送给 @coordinator",
         );
       } else {
         setOverviewCoordFeedback(`发送失败：${res.error ?? "未知错误"}`);
@@ -1755,11 +1762,16 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
       });
       if (res.ok) {
         setComposeText("");
-        const suffix = res.method === "agentapi" ? "（未打断运行中的进程）" : "";
+        const suffix =
+          res.method === "agentapi"
+            ? "（未打断运行中的进程）"
+            : res.method === "hook_inbox"
+              ? "（非中断收件箱：协调者下次步骤/唤醒时自动注入，不打断 Swarm 成员）"
+              : "";
         setSendFeedback(
           composeTarget === "coordinator"
-            ? `✓ 已直达 @coordinator${suffix}`
-            : `✓ 已发给 @coordinator 转达给 @${composeTarget}${suffix}`,
+            ? `✓ 已投递给 @coordinator${suffix}`
+            : `✓ 已投递给 @coordinator 转达给 @${composeTarget}${suffix}`,
         );
       } else {
         setSendFeedback(`发送失败：${res.error ?? "未知错误"}`);
