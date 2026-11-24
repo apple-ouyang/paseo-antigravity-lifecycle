@@ -19,17 +19,18 @@ import {
   type TranscriptStep,
 } from "../shared/rpc.ts";
 import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
-import { getStatusSnapshot, subscribeStatus } from "./store.ts";
+import {
+  consumeConsoleNavRequest,
+  getConsoleNavRequest,
+  getStatusSnapshot,
+  subscribeConsoleNav,
+  subscribeStatus,
+  type SelectedChildTarget,
+} from "./store.ts";
 
 type ConsoleTab = "overview" | "board" | "members" | "tree";
 
-interface SelectedChild {
-  conversationId: string;
-  label: string;
-  subtitle: string | null;
-  running: boolean;
-  workspace: string | null;
-}
+type SelectedChild = SelectedChildTarget;
 
 const MODE_LABELS: Record<AgyMode, string> = {
   swarm: "Swarm",
@@ -473,6 +474,11 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     () => (agentId ? getStatusSnapshot(agentId) : null),
     () => null,
   );
+  const navRequest = useSyncExternalStore(
+    subscribeConsoleNav,
+    () => (agentId ? getConsoleNavRequest(agentId) : null),
+    () => null,
+  );
 
   const [detail, setDetail] = useState<AgyConsoleDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -501,11 +507,51 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   const [showCompletedTree, setShowCompletedTree] = useState(false);
 
   // Child transcript drill-down
-  const [selectedChild, setSelectedChild] = useState<SelectedChild | null>(null);
+  const [selectedChild, setSelectedChild] = useState<SelectedChild | null>(() => {
+    const req = agentId ? getConsoleNavRequest(agentId) : null;
+    return req && req.target.kind === "child" ? req.target.child : null;
+  });
   const [childSteps, setChildSteps] = useState<TranscriptStep[]>([]);
   const [childModel, setChildModel] = useState<string | null>(null);
   const [childTotal, setChildTotal] = useState(0);
   const [childLoading, setChildLoading] = useState(false);
+  const [childNewestFirst, setChildNewestFirst] = useState(true);
+  const [childReplyText, setChildReplyText] = useState("");
+  const [childSending, setChildSending] = useState(false);
+  const [childSendFeedback, setChildSendFeedback] = useState<string | null>(null);
+
+  const selectChild = useCallback((next: SelectedChild) => {
+    setSelectedChild((prev) => {
+      if (prev?.conversationId !== next.conversationId) {
+        setChildSteps([]);
+        setChildModel(null);
+        setChildTotal(0);
+        setChildSendFeedback(null);
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!agentId || !navRequest) return;
+    consumeConsoleNavRequest(agentId, navRequest.seq);
+    const { target } = navRequest;
+    if (target.kind === "child") {
+      selectChild(target.child);
+    } else if (target.kind === "board") {
+      setSelectedChild(null);
+      setTab("board");
+      setTabInitialized(true);
+      if (target.filter) {
+        setBoardFilter(target.filter);
+        setComposeTarget(target.filter);
+      }
+    } else if (target.kind === "overview") {
+      setSelectedChild(null);
+      setTab("overview");
+      setTabInitialized(true);
+    }
+  }, [agentId, navRequest, selectChild]);
 
   const reloadConsole = useCallback(async () => {
     if (!agentId) return;
@@ -555,7 +601,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         const res = await fetchChildTranscript({
           agentId,
           conversationId: child.conversationId,
-          limit: 50,
+          limit: 60,
         });
         if (res) {
           setChildSteps(res.steps);
@@ -571,15 +617,28 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     [agentId, fetchChildTranscript],
   );
 
+  const selectedChildRunning = useMemo(() => {
+    if (!selectedChild) return false;
+    const matchedMember = (swarm?.members ?? []).find(
+      (m) => m.conversationId === selectedChild.conversationId,
+    );
+    if (matchedMember) return matchedMember.state === "working";
+    const matchedTw = (teamwork?.nodes ?? []).find((n) => n.id === selectedChild.conversationId);
+    if (matchedTw) return matchedTw.state === "running";
+    const matchedSub = subagents.find((s) => s.id === selectedChild.conversationId);
+    if (matchedSub) return matchedSub.state === "running";
+    return selectedChild.running;
+  }, [selectedChild, swarm, teamwork, subagents]);
+
   useEffect(() => {
     if (!selectedChild) return;
     void loadChild(selectedChild);
-    if (!selectedChild.running) return;
+    if (!selectedChildRunning) return;
     const timer = setInterval(() => {
       void loadChild(selectedChild);
     }, 3_000);
     return () => clearInterval(timer);
-  }, [selectedChild, loadChild]);
+  }, [selectedChild, selectedChildRunning, loadChild]);
 
   // Partition Swarm members just like official hive.js (exclude role workers monitor/narrator from task team)
   const swarmPartitions = useMemo(() => {
@@ -676,23 +735,42 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
 
   const openMemberLog = (member: SwarmMember) => {
     if (!member.conversationId) return;
-    setSelectedChild({
+    selectChild({
       conversationId: member.conversationId,
       label: `@${member.name}`,
       subtitle: member.model,
       running: member.state === "working",
       workspace: member.workspace ?? null,
+      memberName: member.name,
     });
   };
 
   const openSubagentLog = (node: SubagentItem) => {
-    setSelectedChild({
+    selectChild({
       conversationId: node.id,
       label: node.role,
       subtitle: `${node.typeName}${node.model ? ` · ${node.model}` : ""}`,
       running: node.state === "running",
       workspace: node.workspace ?? null,
     });
+  };
+
+  const handleSendToChildMember = async () => {
+    const memberName = selectedChild?.memberName;
+    const body = childReplyText.trim();
+    if (!memberName || !body || childSending) return;
+    setChildSending(true);
+    setChildSendFeedback(null);
+    try {
+      const prompt = `请在 Swarm 消息板上转达给 @${memberName}：\n${body}`;
+      await paseo.agents.ref(agentId).send(prompt);
+      setChildReplyText("");
+      setChildSendFeedback(`已通过协调者转达给 @${memberName}`);
+    } catch (err) {
+      setChildSendFeedback(`发送失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setChildSending(false);
+    }
   };
 
   const handleSendDirective = async () => {
@@ -714,6 +792,222 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
       setSending(false);
     }
   };
+
+  // Child conversation / live transcript view (rendered immediately even before agyConsoleGet settles)
+  if (selectedChild) {
+    const orderedSteps = childNewestFirst ? [...childSteps].reverse() : childSteps;
+    const quickSwitchMembers = swarmPartitions.live.filter((m) => Boolean(m.conversationId));
+
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
+        <View
+          style={{
+            paddingHorizontal: 14,
+            paddingVertical: 10,
+            borderBottomWidth: 1,
+            borderBottomColor: theme.colors.border,
+            backgroundColor: theme.colors.surface1,
+            gap: 6,
+          }}
+        >
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+            <Pressable onPress={() => setSelectedChild(null)}>
+              <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "600" }}>
+                ← 返回控制台
+              </Text>
+            </Pressable>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              {selectedChild.memberName ? (
+                <Chip
+                  label={`消息板 (@${selectedChild.memberName})`}
+                  color={theme.colors.accent}
+                  theme={theme}
+                  onPress={() => {
+                    const name = selectedChild.memberName!;
+                    setSelectedChild(null);
+                    setTab("board");
+                    setTabInitialized(true);
+                    setBoardFilter(name);
+                    setComposeTarget(name);
+                  }}
+                />
+              ) : null}
+              <Chip
+                label={childNewestFirst ? "最新在前" : "对话正序"}
+                color={theme.colors.foregroundMuted}
+                theme={theme}
+                onPress={() => setChildNewestFirst((v) => !v)}
+              />
+              {selectedChildRunning ? (
+                <Text style={{ color: theme.colors.statusSuccess, fontSize: 11, fontWeight: "600" }}>
+                  ● 实时 (3s)
+                </Text>
+              ) : null}
+              <Pressable onPress={() => void loadChild(selectedChild)}>
+                <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>刷新</Text>
+              </Pressable>
+            </View>
+          </View>
+
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Text style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "700" }}>
+              {selectedChild.label}
+            </Text>
+            <Text
+              style={{
+                color: selectedChildRunning ? theme.colors.accent : theme.colors.foregroundMuted,
+                fontSize: 11,
+                fontWeight: "600",
+              }}
+            >
+              {selectedChildRunning ? "运行中" : "已静默"}
+            </Text>
+          </View>
+
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+            {[
+              selectedChild.subtitle,
+              childModel && childModel !== selectedChild.subtitle ? childModel : null,
+              childTotal > 0 ? `共 ${childTotal} 步（显示最近 ${childSteps.length} 步）` : null,
+              selectedChild.workspace ? shortWorkspace(selectedChild.workspace) : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </Text>
+
+          {quickSwitchMembers.length > 1 ? (
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingTop: 2 }}>
+              {quickSwitchMembers.map((m) => (
+                <Chip
+                  key={m.name}
+                  label={`@${m.name}`}
+                  color={m.state === "working" ? theme.colors.accent : theme.colors.statusWarning}
+                  active={selectedChild.conversationId === m.conversationId}
+                  theme={theme}
+                  onPress={() => openMemberLog(m)}
+                />
+              ))}
+            </View>
+          ) : null}
+        </View>
+
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }}>
+          {childLoading && childSteps.length === 0 ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>加载对话与执行日志中…</Text>
+          ) : orderedSteps.length === 0 ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>暂无对话与步骤记录</Text>
+          ) : (
+            orderedSteps.map((step, idx) => (
+              <View
+                key={`${step.stepIndex}-${step.kind}-${idx}`}
+                style={{
+                  backgroundColor:
+                    step.kind === "user" || step.kind === "assistant"
+                      ? theme.colors.surface2
+                      : theme.colors.surface1,
+                  borderColor: theme.colors.border,
+                  borderWidth: 1,
+                  borderLeftWidth: 3,
+                  borderLeftColor: stepKindColor(step.kind, theme),
+                  borderRadius: 8,
+                  padding: 9,
+                  gap: 4,
+                }}
+              >
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <Text
+                    style={{
+                      color: stepKindColor(step.kind, theme),
+                      fontSize: 11,
+                      fontWeight: "700",
+                      flexShrink: 1,
+                    }}
+                    numberOfLines={1}
+                  >
+                    #{step.stepIndex} · {step.title}
+                  </Text>
+                  {step.createdAt ? (
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+                      {step.createdAt.slice(11, 19)}
+                    </Text>
+                  ) : null}
+                </View>
+                {step.summary ? (
+                  <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
+                    {step.summary}
+                  </Text>
+                ) : null}
+              </View>
+            ))
+          )}
+        </ScrollView>
+
+        {selectedChild.memberName ? (
+          <View
+            style={{
+              paddingHorizontal: 12,
+              paddingVertical: 8,
+              borderTopWidth: 1,
+              borderTopColor: theme.colors.border,
+              backgroundColor: theme.colors.surface1,
+              gap: 6,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <TextInput
+                value={childReplyText}
+                onChangeText={setChildReplyText}
+                placeholder={`给 @${selectedChild.memberName} 发指令（经协调者转达）…`}
+                placeholderTextColor={theme.colors.foregroundMuted}
+                style={{
+                  flex: 1,
+                  backgroundColor: theme.colors.surface0,
+                  borderColor: theme.colors.border,
+                  borderWidth: 1,
+                  borderRadius: 7,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                  color: theme.colors.foreground,
+                  fontSize: 12,
+                }}
+              />
+              <Pressable
+                disabled={childSending || !childReplyText.trim()}
+                onPress={() => void handleSendToChildMember()}
+                style={{
+                  backgroundColor:
+                    childSending || !childReplyText.trim()
+                      ? theme.colors.surface2
+                      : theme.colors.accent,
+                  borderRadius: 7,
+                  paddingHorizontal: 12,
+                  paddingVertical: 7,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      childSending || !childReplyText.trim()
+                        ? theme.colors.foregroundMuted
+                        : theme.colors.accentForeground,
+                    fontSize: 12,
+                    fontWeight: "600",
+                  }}
+                >
+                  {childSending ? "发送中" : "发送"}
+                </Text>
+              </Pressable>
+            </View>
+            {childSendFeedback ? (
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                {childSendFeedback}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
+      </View>
+    );
+  }
 
   if (loading && !status) {
     return (
@@ -751,101 +1045,6 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, textAlign: "center" }}>
           当前会话尚未产生 Swarm、Teamwork、Boost、/goal、Plan 或子代理记录。
         </Text>
-      </View>
-    );
-  }
-
-  // Child transcript drill-down view
-  if (selectedChild) {
-    return (
-      <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
-        <View
-          style={{
-            paddingHorizontal: 14,
-            paddingVertical: 10,
-            borderBottomWidth: 1,
-            borderBottomColor: theme.colors.border,
-            backgroundColor: theme.colors.surface1,
-            gap: 6,
-          }}
-        >
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-            <Pressable onPress={() => setSelectedChild(null)}>
-              <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "600" }}>
-                ← 返回控制台
-              </Text>
-            </Pressable>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-              {selectedChild.running ? (
-                <Text style={{ color: theme.colors.accent, fontSize: 11 }}>实时刷新中 (3s)</Text>
-              ) : null}
-              <Pressable onPress={() => void loadChild(selectedChild)}>
-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>刷新</Text>
-              </Pressable>
-            </View>
-          </View>
-          <Text style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "700" }}>
-            {selectedChild.label}
-          </Text>
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-            {[
-              selectedChild.subtitle,
-              childModel,
-              childTotal > 0 ? `共 ${childTotal} 步（显示最近 ${childSteps.length} 步）` : null,
-              selectedChild.workspace ? shortWorkspace(selectedChild.workspace) : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </Text>
-        </View>
-
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }}>
-          {childLoading && childSteps.length === 0 ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>加载执行日志中…</Text>
-          ) : childSteps.length === 0 ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>暂无步骤日志</Text>
-          ) : (
-            [...childSteps].reverse().map((step) => (
-              <View
-                key={`${step.stepIndex}-${step.kind}-${step.title}`}
-                style={{
-                  backgroundColor: theme.colors.surface1,
-                  borderColor: theme.colors.border,
-                  borderWidth: 1,
-                  borderLeftWidth: 3,
-                  borderLeftColor: stepKindColor(step.kind, theme),
-                  borderRadius: 8,
-                  padding: 9,
-                  gap: 4,
-                }}
-              >
-                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                  <Text
-                    style={{
-                      color: stepKindColor(step.kind, theme),
-                      fontSize: 11,
-                      fontWeight: "700",
-                      flexShrink: 1,
-                    }}
-                    numberOfLines={1}
-                  >
-                    #{step.stepIndex} · {step.title}
-                  </Text>
-                  {step.createdAt ? (
-                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
-                      {step.createdAt.slice(11, 19)}
-                    </Text>
-                  ) : null}
-                </View>
-                {step.summary ? (
-                  <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 17 }}>
-                    {step.summary}
-                  </Text>
-                ) : null}
-              </View>
-            ))
-          )}
-        </ScrollView>
       </View>
     );
   }

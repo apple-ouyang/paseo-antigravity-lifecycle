@@ -4,7 +4,12 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
 import type { AgentBgStatus, SubagentItem, SwarmMember } from "../shared/rpc.ts";
 import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
-import { getStatusSnapshot, openConsoleForAgent, subscribeStatus } from "./store.ts";
+import {
+  getStatusSnapshot,
+  openConsoleForAgent,
+  subscribeStatus,
+  type SelectedChildTarget,
+} from "./store.ts";
 
 const MAX_SHOWN_MEMBERS = 10;
 const ROLE_WORKER_RE = /^(?:narrator|monitor)(?:-\d+)?$/i;
@@ -47,10 +52,14 @@ function StatusContent({
   status,
   theme,
   onOpenConsole,
+  onOpenChild,
+  onOpenBoardForMember,
 }: {
   status: AgentBgStatus;
   theme: PluginTheme;
   onOpenConsole: () => void;
+  onOpenChild: (child: SelectedChildTarget) => void;
+  onOpenBoardForMember: (memberName: string) => void;
 }) {
   const [showCompleted, setShowCompleted] = useState(false);
   const [showDoneSteps, setShowDoneSteps] = useState(false);
@@ -206,13 +215,20 @@ function StatusContent({
           </View>
         ) : null}
 
-        {/* 3. Active Swarm members with per-member elapsed time & step progress */}
+        {/* 3. Active Swarm members with per-member elapsed time & step progress (clickable → jumps to agent chat in console) */}
         {status.swarm ? (
           <View style={{ gap: 6, borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: 8 }}>
-            <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
-              Swarm 成员（{liveMembers.length} 进行中 · {doneMembersCount} 已完成
-              {status.swarm.latestSeq ? ` · #${status.swarm.latestSeq}` : ""}）
-            </Text>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
+                Swarm 成员（{liveMembers.length} 进行中 · {doneMembersCount} 已完成
+                {status.swarm.latestSeq ? ` · #${status.swarm.latestSeq}` : ""}）
+              </Text>
+              {shownMembers.length > 0 ? (
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+                  点击看对话
+                </Text>
+              ) : null}
+            </View>
             {shownMembers.length === 0 ? (
               <Text style={{ color: theme.colors.statusSuccess, fontSize: 11 }}>
                 ✓ 全部 {allMembers.length} 个成员已完成
@@ -221,8 +237,34 @@ function StatusContent({
               shownMembers.map((member) => {
                 const badge = stateLabelAndColor(member.state, member.delivered, theme);
                 const dur = formatDurationShort(member.durationMs);
+                const handleMemberPress = () => {
+                  if (member.conversationId) {
+                    onOpenChild({
+                      conversationId: member.conversationId,
+                      label: `@${member.name}`,
+                      subtitle: member.model,
+                      running: member.state === "working",
+                      workspace: member.workspace ?? null,
+                      memberName: member.name,
+                    });
+                  } else {
+                    onOpenBoardForMember(member.name);
+                  }
+                };
                 return (
-                  <View key={member.name + member.conversationId} style={{ gap: 2 }}>
+                  <Pressable
+                    key={member.name + member.conversationId}
+                    onPress={handleMemberPress}
+                    style={{
+                      gap: 2,
+                      backgroundColor: theme.colors.surface1,
+                      borderColor: theme.colors.border,
+                      borderWidth: 1,
+                      borderRadius: 7,
+                      paddingHorizontal: 9,
+                      paddingVertical: 6,
+                    }}
+                  >
                     <View
                       style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}
                     >
@@ -241,16 +283,19 @@ function StatusContent({
                           </Text>
                         ) : null}
                       </View>
-                      <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
-                        {badge.label}
-                      </Text>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                        <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
+                          {badge.label}
+                        </Text>
+                        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>›</Text>
+                      </View>
                     </View>
                     {member.lastActivity ? (
                       <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
                         {member.lastActivity}
                       </Text>
                     ) : null}
-                  </View>
+                  </Pressable>
                 );
               })
             )}
@@ -273,23 +318,41 @@ function StatusContent({
                 const indent = Math.min(node.depth ?? 0, 3) * 10;
                 const dur = formatDurationShort(node.durationMs);
                 return (
-                  <View
+                  <Pressable
                     key={node.id}
+                    onPress={() =>
+                      onOpenChild({
+                        conversationId: node.id,
+                        label: node.role,
+                        subtitle: `${node.typeName}${node.model ? ` · ${node.model}` : ""}`,
+                        running: node.state === "running",
+                        workspace: node.workspace ?? null,
+                      })
+                    }
                     style={{
                       marginLeft: indent,
                       flexDirection: "row",
                       justifyContent: "space-between",
                       alignItems: "center",
                       gap: 10,
+                      backgroundColor: theme.colors.surface1,
+                      borderColor: theme.colors.border,
+                      borderWidth: 1,
+                      borderRadius: 6,
+                      paddingHorizontal: 8,
+                      paddingVertical: 5,
                     }}
                   >
                     <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
                       {node.role}{dur ? ` (${dur})` : ""}
                     </Text>
-                    <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
-                      {badge.label}
-                    </Text>
-                  </View>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                      <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
+                        {badge.label}
+                      </Text>
+                      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>›</Text>
+                    </View>
+                  </Pressable>
                 );
               })
             )}
@@ -305,17 +368,40 @@ function StatusContent({
             {shownSubs.map((sub) => {
               const badge = stateLabelAndColor(sub.state, false, theme);
               return (
-                <View
+                <Pressable
                   key={sub.id}
-                  style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}
+                  onPress={() =>
+                    onOpenChild({
+                      conversationId: sub.id,
+                      label: sub.role,
+                      subtitle: `${sub.typeName}${sub.model ? ` · ${sub.model}` : ""}`,
+                      running: sub.state === "running",
+                      workspace: sub.workspace ?? null,
+                    })
+                  }
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 12,
+                    backgroundColor: theme.colors.surface1,
+                    borderColor: theme.colors.border,
+                    borderWidth: 1,
+                    borderRadius: 6,
+                    paddingHorizontal: 8,
+                    paddingVertical: 5,
+                  }}
                 >
                   <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
                     {sub.role} ({sub.typeName})
                   </Text>
-                  <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
-                    {badge.label}
-                  </Text>
-                </View>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                    <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
+                      {badge.label}
+                    </Text>
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>›</Text>
+                  </View>
+                </Pressable>
               );
             })}
           </View>
@@ -368,7 +454,17 @@ export function AgyLifecyclePopover(props: PluginButtonContentProps) {
 
   const handleOpenConsole = () => {
     props.close();
-    openConsoleForAgent(agentId, workspaceId);
+    openConsoleForAgent(agentId, workspaceId, { kind: "overview" });
+  };
+
+  const handleOpenChild = (child: SelectedChildTarget) => {
+    props.close();
+    openConsoleForAgent(agentId, workspaceId, { kind: "child", child });
+  };
+
+  const handleOpenBoardForMember = (memberName: string) => {
+    props.close();
+    openConsoleForAgent(agentId, workspaceId, { kind: "board", filter: memberName });
   };
 
   if (!status) {
@@ -388,5 +484,13 @@ export function AgyLifecyclePopover(props: PluginButtonContentProps) {
       </View>
     );
   }
-  return <StatusContent status={status} theme={props.theme} onOpenConsole={handleOpenConsole} />;
+  return (
+    <StatusContent
+      status={status}
+      theme={props.theme}
+      onOpenConsole={handleOpenConsole}
+      onOpenChild={handleOpenChild}
+      onOpenBoardForMember={handleOpenBoardForMember}
+    />
+  );
 }
