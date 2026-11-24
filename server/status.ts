@@ -793,17 +793,139 @@ function readBoardQuickMeta(boardPath: string): {
   }
 }
 
+function extractLatestSwarmTitleTs(rows: TranscriptRow[]): number | null {
+  let latest: number | null = null;
+  for (const r of rows) {
+    if (r.type !== "PLANNER_RESPONSE" || !r.tool_calls) continue;
+    const hasTitle = r.tool_calls.some(
+      (tc) =>
+        tc.name === "swarm" &&
+        String(cleanArg(tc.args?.action) ?? "").toLowerCase() === "title",
+    );
+    if (!hasTitle) continue;
+    const ts = parseIsoMs(r.created_at);
+    if (ts !== null && (latest === null || ts > latest)) {
+      latest = ts;
+    }
+  }
+  return latest;
+}
+
+function isMemberUnkilled(m: SwarmMember): boolean {
+  return m.state === "working" || m.state === "waiting" || m.state === "failed";
+}
+
+function selectCurrentSwarmWaveMembers(
+  taskMembers: SwarmMember[],
+  rawSwarmPlan: RawSwarmPlanFile | null,
+  latestSwarmTitleTs: number | null,
+): { scopeMembers: SwarmMember[]; scopeLabel: string; planIsStale: boolean } {
+  const planNames = new Set<string>();
+  if (rawSwarmPlan?.tasks) {
+    for (const k of Object.keys(rawSwarmPlan.tasks)) planNames.add(k);
+  }
+  if (Array.isArray(rawSwarmPlan?.threads)) {
+    for (const th of rawSwarmPlan.threads) {
+      for (const n of th.tasks ?? []) planNames.add(n);
+    }
+  }
+
+  const planMembers =
+    planNames.size > 0 ? taskMembers.filter((m) => planNames.has(m.name)) : [];
+  const unkilledMembers = taskMembers.filter((m) => isMemberUnkilled(m));
+  const planUnkilled = planMembers.filter((m) => isMemberUnkilled(m));
+  const unplannedUnkilled = unkilledMembers.filter((m) => !planNames.has(m.name));
+
+  const planMaxStartedAt = planMembers.reduce(
+    (max, m) => (m.startedAt != null && m.startedAt > max ? m.startedAt : max),
+    0,
+  );
+
+  // Case A: Active members exist outside plan.json, and NONE of plan.json's members are live
+  // -> Coordinator started a new Swarm wave without updating plan.json!
+  if (unplannedUnkilled.length > 0 && planUnkilled.length === 0) {
+    const liveStarts = unkilledMembers
+      .map((m) => m.startedAt)
+      .filter((t): t is number => typeof t === "number");
+    const liveMinStartedAt = liveStarts.length > 0 ? Math.min(...liveStarts) : null;
+
+    let waveCutoffMs: number;
+    if (latestSwarmTitleTs !== null && latestSwarmTitleTs > planMaxStartedAt) {
+      waveCutoffMs = latestSwarmTitleTs - 30_000;
+    } else if (liveMinStartedAt !== null) {
+      waveCutoffMs = Math.max(planMaxStartedAt + 1, liveMinStartedAt - 120_000);
+    } else {
+      waveCutoffMs = planMaxStartedAt + 1;
+    }
+
+    const scopeMembers = taskMembers.filter(
+      (m) =>
+        isMemberUnkilled(m) ||
+        (!planNames.has(m.name) && m.startedAt != null && m.startedAt >= waveCutoffMs),
+    );
+    return {
+      scopeMembers: scopeMembers.length > 0 ? scopeMembers : unkilledMembers,
+      scopeLabel: "当前波次",
+      planIsStale: planMembers.length > 0,
+    };
+  }
+
+  // Case B: Coordinator is in the plan.json wave AND dynamically added extra unkilled members
+  if (unplannedUnkilled.length > 0 && planUnkilled.length > 0) {
+    const seen = new Set<string>();
+    const combined: SwarmMember[] = [];
+    for (const m of [...planMembers, ...unplannedUnkilled]) {
+      if (seen.has(m.name)) continue;
+      seen.add(m.name);
+      combined.push(m);
+    }
+    return { scopeMembers: combined, scopeLabel: "当前波次", planIsStale: false };
+  }
+
+  // Case C: All members are finished/killed; check if a newer wave ran after plan.json
+  if (unkilledMembers.length === 0) {
+    if (latestSwarmTitleTs !== null && latestSwarmTitleTs > planMaxStartedAt) {
+      const postTitle = taskMembers.filter(
+        (m) => m.startedAt != null && m.startedAt >= latestSwarmTitleTs - 30_000,
+      );
+      if (postTitle.length > 0 && postTitle.some((m) => !planNames.has(m.name))) {
+        return { scopeMembers: postTitle, scopeLabel: "当前波次", planIsStale: planMembers.length > 0 };
+      }
+    }
+    if (planMembers.length > 0) {
+      const unplannedFinished = taskMembers.filter(
+        (m) => !planNames.has(m.name) && m.startedAt != null && m.startedAt > planMaxStartedAt + 120_000,
+      );
+      if (unplannedFinished.length > 0) {
+        const newestStart = Math.max(...unplannedFinished.map((m) => m.startedAt!));
+        const newestBurst = unplannedFinished.filter((m) => m.startedAt! >= newestStart - 300_000);
+        return { scopeMembers: newestBurst, scopeLabel: "当前波次", planIsStale: true };
+      }
+      return { scopeMembers: planMembers, scopeLabel: "当前波次", planIsStale: false };
+    }
+    return { scopeMembers: taskMembers, scopeLabel: "Swarm 成员", planIsStale: false };
+  }
+
+  // Case D: Standard active plan.json wave
+  if (planMembers.length > 0) {
+    return { scopeMembers: planMembers, scopeLabel: "当前波次", planIsStale: false };
+  }
+  return { scopeMembers: taskMembers, scopeLabel: "Swarm 成员", planIsStale: false };
+}
+
 function computeProgress(input: {
   now: number;
   primaryMode: AgyPrimaryMode;
   swarm: AgentBgStatus["swarm"];
   rawSwarmPlan: RawSwarmPlanFile | null;
+  latestSwarmTitleTs: number | null;
   teamwork: TeamworkStatus | null;
   plan: PlanStatus | null;
   workflows: WorkflowRun[];
   subagents: SubagentItem[];
 }): ProgressSummary | null {
-  const { now, primaryMode, swarm, rawSwarmPlan, teamwork, plan, workflows, subagents } = input;
+  const { now, primaryMode, swarm, rawSwarmPlan, latestSwarmTitleTs, teamwork, plan, workflows, subagents } =
+    input;
 
   // Helper to compute parallel ETA from per-unit start/duration arrays
   const finalizeTiming = (
@@ -884,21 +1006,11 @@ function computeProgress(input: {
 
   if (swarm && (primaryMode === "swarm" || (primaryMode !== "teamwork" && swarm.members.length > 0))) {
     const taskMembers = swarm.members.filter((m) => !isRoleWorkerName(m.name));
-    const planNames = new Set<string>();
-    if (rawSwarmPlan?.tasks) {
-      for (const k of Object.keys(rawSwarmPlan.tasks)) planNames.add(k);
-    }
-    if (Array.isArray(rawSwarmPlan?.threads)) {
-      for (const th of rawSwarmPlan.threads) {
-        for (const n of th.tasks ?? []) planNames.add(n);
-      }
-    }
-    const waveMembers =
-      planNames.size > 0
-        ? taskMembers.filter((m) => planNames.has(m.name))
-        : taskMembers;
-    const scopeMembers = waveMembers.length > 0 ? waveMembers : taskMembers;
-    const scopeLabel = planNames.size > 0 && waveMembers.length > 0 ? "当前波次" : "Swarm 成员";
+    const { scopeMembers, scopeLabel } = selectCurrentSwarmWaveMembers(
+      taskMembers,
+      rawSwarmPlan,
+      latestSwarmTitleTs,
+    );
 
     if (scopeMembers.length > 0) {
       let completed = 0;
@@ -1437,12 +1549,14 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
   else if (plan) primaryMode = "plan";
   else if (subagents.length > 0) primaryMode = "subagents";
 
+  const latestSwarmTitleTs = extractLatestSwarmTitleTs(rows);
   const hasConsoleData = modes.length > 0;
   const progress = computeProgress({
     now,
     primaryMode,
     swarm,
     rawSwarmPlan,
+    latestSwarmTitleTs,
     teamwork,
     plan,
     workflows,

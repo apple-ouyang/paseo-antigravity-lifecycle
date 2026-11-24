@@ -799,6 +799,16 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     return { open, done };
   }, [swarmPlan, swarm, whoFilter]);
 
+  const swarmPlanIsStale = useMemo(() => {
+    if (!swarmPlan || swarmPartitions.live.length === 0) return false;
+    const planNames = new Set<string>(Object.keys(swarmPlan.tasks ?? {}));
+    for (const th of swarmPlan.threads ?? []) {
+      for (const t of th.tasks ?? []) planNames.add(t);
+    }
+    if (planNames.size === 0) return false;
+    return !swarmPartitions.live.some((m) => planNames.has(m.name));
+  }, [swarmPlan, swarmPartitions.live]);
+
   const memberNames = useMemo(() => {
     const names = new Set<string>(["coordinator"]);
     for (const m of swarmPartitions.live) names.add(m.name);
@@ -1399,8 +1409,8 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             )
           ) : null}
 
-          {/* 1. Goal card (compact 2 lines) */}
-          {swarmPlan?.goal ? (
+          {/* 1. Goal card (compact 2 lines; hidden if plan.json is stale from a previous wave) */}
+          {swarmPlan?.goal && !swarmPlanIsStale ? (
             <View
               style={{
                 backgroundColor: theme.colors.surface1,

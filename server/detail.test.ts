@@ -384,3 +384,100 @@ test("readChildTranscript caches parsed steps and returns byte-incremental delta
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
+
+test("inspectAgySession switches progress to new Swarm wave when plan.json is stale from prior wave", () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-newwave-"));
+  try {
+    const now = Date.now();
+    const brain = path.join(homeDir, ".gemini", "antigravity-cli", "brain");
+    const tOldStart = new Date(now - 70 * 60_000).toISOString();
+    const tOldEnd = new Date(now - 40 * 60_000).toISOString();
+    const tNewTitle = new Date(now - 13 * 60_000).toISOString();
+    const tNewStart = new Date(now - 12 * 60_000).toISOString();
+    const tNewDone = new Date(now - 2 * 60_000).toISOString();
+
+    writeJsonl(path.join(brain, "multi-wave", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tOldStart, content: "/swarm wave1" },
+      {
+        step_index: 2,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: tNewTitle,
+        tool_calls: [{ name: "swarm", args: { action: "\"title\"", title: "\"Wave 2 New\"" } }],
+      },
+      {
+        step_index: 3,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: new Date(now - 5_000).toISOString(),
+        tool_calls: [{ name: "swarm_wait", args: { since: 10 } }],
+      },
+    ]);
+    writeJson(path.join(brain, "multi-wave", ".system_generated", "logs", "process.json"), {
+      conversationId: "multi-wave",
+      pid: 99999,
+      event: "PreInvocation",
+      ts: now - 5_000,
+    });
+    // Stale plan.json still lists only Wave 1's killed members!
+    writeJson(path.join(brain, "multi-wave", ".system_generated", "swarm", "plan.json"), {
+      goal: { title: "Old Wave 1 Goal", line: "Old line" },
+      tasks: { "old-a": "Old A", "old-b": "Old B" },
+      threads: [{ id: "t-old", title: "Old Thread", goal: "Old", tasks: ["old-a", "old-b"] }],
+    });
+    writeJson(path.join(brain, "multi-wave", ".system_generated", "swarm", "members.json"), {
+      title: "Wave 2 New",
+      members: {
+        coordinator: { conversation_id: "multi-wave", role: "coordinator" },
+        "old-a": { conversation_id: "c-old-a", role: "worker", killed: true, phase: "KILLED" },
+        "old-b": { conversation_id: "c-old-b", role: "worker", killed: true, phase: "KILLED" },
+        // New wave: p1 already killed/done, p2 running, p3 waiting
+        "p1-done": { conversation_id: "c-p1", role: "worker", killed: true, phase: "KILLED" },
+        "p2-run": { conversation_id: "c-p2", role: "worker", killed: false, phase: "RUNNING", last_nudged_seq: 11, wait_since: 10 },
+        "p3-wait": { conversation_id: "c-p3", role: "worker", killed: false, phase: "RUNNING", last_nudged_seq: 10, wait_since: 10 },
+      },
+    });
+    writeJsonl(path.join(brain, "c-old-a", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tOldStart, content: "old a" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: tOldEnd, content: "done" },
+    ]);
+    writeJsonl(path.join(brain, "c-old-b", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tOldStart, content: "old b" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: tOldEnd, content: "done" },
+    ]);
+    writeJsonl(path.join(brain, "c-p1", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tNewStart, content: "p1" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: tNewDone, content: "p1 done" },
+    ]);
+    writeJsonl(path.join(brain, "c-p2", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tNewStart, content: "p2" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "RUNNING", created_at: new Date(now - 3_000).toISOString(), content: "" },
+    ]);
+    writeJsonl(path.join(brain, "c-p3", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tNewStart, content: "p3" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: new Date(now - 30_000).toISOString(), content: "waiting" },
+    ]);
+
+    const st = inspectAgySession({
+      agentId: "agent-mw",
+      sessionId: "multi-wave",
+      agentAlive: true,
+      homeDir,
+      now,
+      isPidAlive: () => true,
+    });
+    assert.ok(st);
+    assert.ok(st.progress);
+    assert.equal(st.progress.scopeLabel, "当前波次");
+    // Must ignore stale 2/2 from plan.json and count the 3 Wave 2 members (p1 done, p2 running, p3 waiting)!
+    assert.equal(st.progress.total, 3);
+    assert.equal(st.progress.completed, 1);
+    assert.equal(st.progress.running, 1);
+    assert.equal(st.progress.waiting, 1);
+    assert.equal(st.progress.percent, 33);
+    // Elapsed time must reflect Wave 2 (~12m), NOT Wave 1 (~70m)!
+    assert.ok((st.progress.elapsedMs ?? 0) < 20 * 60_000);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
