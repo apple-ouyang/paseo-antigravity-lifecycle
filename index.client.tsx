@@ -43,7 +43,7 @@ function resolvePillPresentation(st: AgentBgStatus | null): { visible: boolean; 
 
   if (st.backgroundActive) {
     if (st.swarm && prog && (st.primaryMode === "swarm" || st.swarm.working > 0)) {
-      const pct = `${prog.percent}% (${prog.completed}/${prog.total})`;
+      const pct = `${prog.percent}% ${prog.completed}/${prog.total}`;
       const timeHint =
         prog.etaState === "estimated" && prog.etaMs !== null
           ? ` · ~${formatDurationShort(prog.etaMs)}`
@@ -65,14 +65,14 @@ function resolvePillPresentation(st: AgentBgStatus | null): { visible: boolean; 
           : "";
       return {
         visible: true,
-        label: `Teamwork ${prog.percent}% (${prog.completed}/${prog.total})${eta}`,
+        label: `Teamwork ${prog.percent}% ${prog.completed}/${prog.total}${eta}`,
       };
     }
     if (prog && prog.total > 0 && (st.primaryMode === "subagents" || st.primaryMode === "workflow")) {
       const prefix = st.primaryMode === "workflow" ? "Workflow" : "子代理";
       return {
         visible: true,
-        label: `${prefix} ${prog.percent}% (${prog.completed}/${prog.total})`,
+        label: `${prefix} ${prog.percent}% ${prog.completed}/${prog.total}`,
       };
     }
     return {
@@ -84,16 +84,16 @@ function resolvePillPresentation(st: AgentBgStatus | null): { visible: boolean; 
   if (st.goalActive) {
     const planHint =
       st.plan && st.plan.total > 0
-        ? ` · ${Math.round((st.plan.completed / st.plan.total) * 100)}% (${st.plan.completed}/${st.plan.total})`
+        ? ` · ${Math.round((st.plan.completed / st.plan.total) * 100)}% ${st.plan.completed}/${st.plan.total}`
         : "";
     return { visible: true, label: `/goal${planHint || " 循环中"}` };
   }
   if (st.swarm) {
-    const doneTag = prog ? ` ${prog.percent}% (${prog.completed}/${prog.total})` : "";
+    const doneTag = prog ? ` ${prog.percent}% ${prog.completed}/${prog.total}` : "";
     return { visible: true, label: `Swarm ✓${doneTag}` };
   }
   if (st.teamwork) {
-    const doneTag = prog ? ` ${prog.percent}% (${prog.completed}/${prog.total})` : "";
+    const doneTag = prog ? ` ${prog.percent}% ${prog.completed}/${prog.total}` : "";
     return { visible: true, label: `Teamwork ✓${doneTag}` };
   }
   if (st.plan && st.plan.total > 0) {
@@ -102,8 +102,8 @@ function resolvePillPresentation(st: AgentBgStatus | null): { visible: boolean; 
       visible: true,
       label:
         st.plan.completed >= st.plan.total
-          ? `任务 ✓ (${st.plan.completed}/${st.plan.total})`
-          : `任务 ${pct}% (${st.plan.completed}/${st.plan.total})`,
+          ? `任务 ✓ ${st.plan.completed}/${st.plan.total}`
+          : `任务 ${pct}% ${st.plan.completed}/${st.plan.total}`,
     };
   }
   if (st.workflows && st.workflows.length > 0) {

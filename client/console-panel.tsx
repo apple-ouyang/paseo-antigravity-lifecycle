@@ -384,7 +384,7 @@ function MemberRow({
           {[
             shortWorkspace(member.workspace),
             member.stepCount ? `${member.stepCount} 步` : null,
-            member.conversationId ? "点击查看日志 →" : null,
+            member.conversationId ? "点击查看对话 →" : null,
           ]
             .filter(Boolean)
             .join(" · ")}
@@ -1572,8 +1572,8 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             </DisclosureBar>
           ) : null}
 
-          {/* 4. Open Threads (only active/issue threads shown prominently; tasks expand only when needed) */}
-          {threadPartitions.open.length > 0 ? (
+          {/* 4. Open Threads (only active/issue threads shown prominently; hidden when plan.json is stale) */}
+          {!swarmPlanIsStale && threadPartitions.open.length > 0 ? (
             <View style={{ gap: 8 }}>
               <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "700" }}>
                 进行中线程（{threadPartitions.open.length}）
@@ -1612,8 +1612,8 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             </View>
           ) : null}
 
-          {/* 5. Completed Threads (collapsed by default so finished work never clutters the view!) */}
-          {threadPartitions.done.length > 0 ? (
+          {/* 5. Completed Threads (collapsed by default; hidden when plan.json is stale) */}
+          {!swarmPlanIsStale && threadPartitions.done.length > 0 ? (
             <DisclosureBar
               title={`已完成线程（已折叠，点击查看）`}
               count={`${threadPartitions.done.length} 个`}

@@ -543,3 +543,62 @@ test("inspectAgySession matches official AGY turnEnded logic for mid-turn wakeup
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
+
+test("inspectAgySession clears stale [done] on rework, recognizes [review:x] PASS, and handles empty title + active plan", () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-rework-"));
+  try {
+    const now = Date.now();
+    const brain = path.join(homeDir, ".gemini", "antigravity-cli", "brain");
+    const iso1 = new Date(now - 120_000).toISOString();
+    const iso2 = new Date(now - 10_000).toISOString();
+
+    writeJsonl(path.join(brain, "rw-coord", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: iso1, content: "/swarm check" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: iso2, tool_calls: [{ name: "swarm_wait", args: { since: 4 } }] },
+    ]);
+    writeJson(path.join(brain, "rw-coord", ".system_generated", "logs", "process.json"), {
+      conversationId: "rw-coord",
+      pid: 77772,
+      event: "PreInvocation",
+      ts: now - 5_000,
+    });
+    writeJson(path.join(brain, "rw-coord", ".system_generated", "swarm", "members.json"), {
+      title: "",
+      members: {
+        coordinator: { conversation_id: "rw-coord", role: "coordinator" },
+        "lane-pass": { conversation_id: "c-pass", role: "worker", killed: false, wait_since: 4, last_nudged_seq: 4 },
+        "lane-rework": { conversation_id: "c-rework", role: "worker", killed: false, wait_since: 4, last_nudged_seq: 4 },
+        "auditor-x": { conversation_id: "c-aud", role: "worker", killed: false, wait_since: 4, last_nudged_seq: 4 },
+      },
+    });
+    writeJsonl(path.join(brain, "rw-coord", ".system_generated", "swarm", "board.jsonl"), [
+      { seq: 1, agent: "lane-rework", text: "@coordinator [done] initial submit", time: "2026-11-24 20:50:00" },
+      { seq: 2, agent: "lane-pass", text: "@auditor-x 返工完成，请复审", time: "2026-11-24 20:55:00" },
+      { seq: 3, agent: "auditor-x", text: "@coordinator [review:lane-pass] PASS 全部闭环", time: "2026-11-24 20:58:00" },
+      { seq: 4, agent: "auditor-x", text: "@lane-rework BLOCK 请修复 2 处数值误差", time: "2026-11-24 21:00:00" },
+    ]);
+    for (const cid of ["c-pass", "c-rework", "c-aud"]) {
+      writeJsonl(path.join(brain, cid, ".system_generated", "logs", "transcript.jsonl"), [
+        { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", created_at: iso2, tool_calls: [{ name: "swarm_wait", args: { since: 4 } }] },
+        { step_index: 2, type: "GENERIC", status: "DONE", created_at: iso2, content: "waiting" },
+      ]);
+    }
+
+    const st = inspectAgySession({
+      agentId: "agent-rw",
+      sessionId: "rw-coord",
+      agentAlive: true,
+      homeDir,
+      now,
+      isPidAlive: () => true,
+    });
+    assert.ok(st?.swarm);
+    // Empty title string should normalize to null
+    assert.equal(st.swarm.title, null);
+    const byName = new Map(st.swarm.members.map((m) => [m.name, m]));
+    assert.equal(byName.get("lane-pass")?.delivered, true);
+    assert.equal(byName.get("lane-rework")?.delivered, false);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});

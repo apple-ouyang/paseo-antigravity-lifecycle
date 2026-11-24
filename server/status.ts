@@ -130,6 +130,56 @@ const HOOK_RACE_GRACE_MS = 5_000;
 const WAKEUP_MID_WINDOW_MS = 90_000;
 const MAX_SUBAGENT_TREE_DEPTH = 5;
 const MAX_SUBAGENT_TREE_NODES = 120;
+const MAX_TRANSCRIPT_ROWS_CACHE = 300;
+const MAX_BOARD_META_CACHE = 60;
+
+interface CachedRowsEntry {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  rows: TranscriptRow[];
+  lastAccessedAt: number;
+}
+
+interface CachedBoardMetaEntry {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  meta: {
+    count: number;
+    latestSeq: number;
+    mtimeMs: number;
+    doneAgents: Set<string>;
+  };
+  lastAccessedAt: number;
+}
+
+const transcriptRowsCache = new Map<string, CachedRowsEntry>();
+const boardMetaCache = new Map<string, CachedBoardMetaEntry>();
+
+export function clearStatusCaches(): void {
+  transcriptRowsCache.clear();
+  boardMetaCache.clear();
+}
+
+function evictLru<T extends { lastAccessedAt: number }>(map: Map<string, T>, max: number): void {
+  if (map.size <= max) return;
+  let oldestKey: string | null = null;
+  let oldestTs = Infinity;
+  for (const [k, v] of map) {
+    if (v.lastAccessedAt < oldestTs) {
+      oldestTs = v.lastAccessedAt;
+      oldestKey = k;
+    }
+  }
+  if (oldestKey) map.delete(oldestKey);
+}
+
+function nonEmpty(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
 
 function defaultIsPidAlive(pid: number): boolean {
   try {
@@ -186,34 +236,57 @@ export function cleanArg(value: unknown): unknown {
 }
 
 export function readTranscriptRows(transcriptPath: string): TranscriptRow[] {
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(transcriptPath);
+  } catch {
+    transcriptRowsCache.delete(transcriptPath);
+    return [];
+  }
+  const now = Date.now();
+  const cached = transcriptRowsCache.get(transcriptPath);
+  if (cached && cached.ino === st.ino && cached.size === st.size && cached.mtimeMs === st.mtimeMs) {
+    cached.lastAccessedAt = now;
+    return cached.rows;
+  }
+
   let raw = "";
   try {
     raw = readFileSync(transcriptPath, "utf8");
   } catch {
     return [];
   }
-  if (!raw.trim()) return [];
   const rows: TranscriptRow[] = [];
-  const stepMap = new Map<number, number>();
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const obj = JSON.parse(trimmed) as TranscriptRow;
-      if (!obj || typeof obj !== "object") continue;
-      if (typeof obj.step_index === "number") {
-        const existing = stepMap.get(obj.step_index);
-        if (existing !== undefined) {
-          rows[existing] = obj;
-          continue;
+  if (raw.trim()) {
+    const stepMap = new Map<number, number>();
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const obj = JSON.parse(trimmed) as TranscriptRow;
+        if (!obj || typeof obj !== "object") continue;
+        if (typeof obj.step_index === "number") {
+          const existing = stepMap.get(obj.step_index);
+          if (existing !== undefined) {
+            rows[existing] = obj;
+            continue;
+          }
+          stepMap.set(obj.step_index, rows.length);
         }
-        stepMap.set(obj.step_index, rows.length);
+        rows.push(obj);
+      } catch {
+        // Ignore partial line while agy appends to transcript.jsonl.
       }
-      rows.push(obj);
-    } catch {
-      // Ignore partial line while agy appends to transcript.jsonl.
     }
   }
+  transcriptRowsCache.set(transcriptPath, {
+    ino: st.ino,
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    rows,
+    lastAccessedAt: now,
+  });
+  evictLru(transcriptRowsCache, MAX_TRANSCRIPT_ROWS_CACHE);
   return rows;
 }
 
@@ -774,6 +847,8 @@ function scanSubagentTree(
 const ROLE_WORKER_RE = /^(?:narrator|monitor)(?:-\d+)?$/i;
 const DONE_POST_RE =
   /^(@[A-Za-z0-9_-]+[\s,:–—-]*)*(?:\*\*|\*|`|_)?\[done\](?:\*\*|\*|`|_)?/i;
+const REVIEW_PASS_RE = /\[review:([A-Za-z0-9_-]+)\][^\n]*\bPASS\b/i;
+const BOARD_MENTION_RE = /(?:^|[\s(（【\[])@([a-z0-9][a-z0-9_-]{0,23})/gi;
 
 function isRoleWorkerName(name: string): boolean {
   return ROLE_WORKER_RE.test(name);
@@ -785,14 +860,26 @@ function readBoardQuickMeta(boardPath: string): {
   mtimeMs: number;
   doneAgents: Set<string>;
 } {
-  const mtimeMs = readMtimeMs(boardPath);
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(boardPath);
+  } catch {
+    boardMetaCache.delete(boardPath);
+    return { count: 0, latestSeq: 0, mtimeMs: 0, doneAgents: new Set() };
+  }
+  const now = Date.now();
+  const cached = boardMetaCache.get(boardPath);
+  if (cached && cached.ino === st.ino && cached.size === st.size && cached.mtimeMs === st.mtimeMs) {
+    cached.lastAccessedAt = now;
+    return cached.meta;
+  }
+
+  const mtimeMs = st.mtimeMs;
   const doneAgents = new Set<string>();
-  if (mtimeMs === 0) return { count: 0, latestSeq: 0, mtimeMs: 0, doneAgents };
   try {
     const raw = readFileSync(boardPath, "utf8");
     const lines = raw.split("\n").filter((l) => l.trim().length > 0);
     let latestSeq = lines.length;
-    const lastTextByAgent = new Map<string, string>();
     for (const line of lines) {
       try {
         const obj = JSON.parse(line) as { seq?: number; agent?: string; text?: string };
@@ -800,7 +887,27 @@ function readBoardQuickMeta(boardPath: string): {
           latestSeq = obj.seq;
         }
         if (typeof obj.agent === "string" && typeof obj.text === "string") {
-          lastTextByAgent.set(obj.agent, obj.text.trim());
+          const text = obj.text.trim();
+          const passMatch = REVIEW_PASS_RE.exec(text);
+          if (passMatch?.[1]) {
+            doneAgents.add(passMatch[1]);
+          } else {
+            // If another agent @mentions a previously-done worker (e.g. red-team rework),
+            // clear its stale delivered state unless this is a PASS review or done summary.
+            BOARD_MENTION_RE.lastIndex = 0;
+            let m: RegExpExecArray | null;
+            while ((m = BOARD_MENTION_RE.exec(text)) !== null) {
+              const mentioned = m[1];
+              if (mentioned !== obj.agent && mentioned !== "coordinator" && mentioned !== "all") {
+                doneAgents.delete(mentioned);
+              }
+            }
+          }
+          if (DONE_POST_RE.test(text)) {
+            doneAgents.add(obj.agent);
+          } else if (obj.agent !== "coordinator") {
+            doneAgents.delete(obj.agent);
+          }
         }
       } catch {
         // skip partial line
@@ -814,12 +921,16 @@ function readBoardQuickMeta(boardPath: string): {
         // keep latestSeq
       }
     }
-    for (const [agent, text] of lastTextByAgent) {
-      if (DONE_POST_RE.test(text)) {
-        doneAgents.add(agent);
-      }
-    }
-    return { count: lines.length, latestSeq, mtimeMs, doneAgents };
+    const meta = { count: lines.length, latestSeq, mtimeMs, doneAgents };
+    boardMetaCache.set(boardPath, {
+      ino: st.ino,
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      meta,
+      lastAccessedAt: now,
+    });
+    evictLru(boardMetaCache, MAX_BOARD_META_CACHE);
+    return meta;
   } catch {
     return { count: 0, latestSeq: 0, mtimeMs, doneAgents };
   }
@@ -1036,7 +1147,16 @@ function computeProgress(input: {
     };
   };
 
-  if (swarm && (primaryMode === "swarm" || (primaryMode !== "teamwork" && swarm.members.length > 0))) {
+  const swarmHasLive = Boolean(
+    swarm && swarm.members.some((m) => !isRoleWorkerName(m.name) && isMemberUnkilled(m)),
+  );
+  const planHasOpenWork = Boolean(plan && (plan.inPlanMode || plan.completed < plan.total));
+
+  if (
+    swarm &&
+    (swarmHasLive || !planHasOpenWork) &&
+    (primaryMode === "swarm" || (primaryMode !== "teamwork" && swarm.members.length > 0))
+  ) {
     const taskMembers = swarm.members.filter((m) => !isRoleWorkerName(m.name));
     const { scopeMembers, scopeLabel } = selectCurrentSwarmWaveMembers(
       taskMembers,
@@ -1366,7 +1486,7 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     } else {
       state = "waiting";
     }
-    const delivered = boardMeta.doneAgents.has(name);
+    const delivered = state !== "working" && boardMeta.doneAgents.has(name);
     const isFinishedMember =
       state === "completed" ||
       state === "failed" ||
@@ -1406,10 +1526,7 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
       } else if (
         !runtimeAlive ||
         child.stopIdle ||
-        (child.lastType === "PLANNER_RESPONSE" &&
-          child.lastStatus === "DONE" &&
-          !child.stopBusy &&
-          !child.hasOpenTask)
+        (child.turnEnded === true && !child.stopBusy && !child.hasOpenTask)
       ) {
         state = "completed";
       } else {
@@ -1498,7 +1615,10 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
   const swarm =
     members.length > 0
       ? {
-          title: rawSwarm?.title ?? rawSwarmMeta?.title ?? planGoal?.title ?? null,
+          title:
+            nonEmpty(rawSwarm?.title) ??
+            nonEmpty(rawSwarmMeta?.title) ??
+            nonEmpty(planGoal?.title),
           working: workingCount,
           waiting: waitingCount,
           completed: completedCount,

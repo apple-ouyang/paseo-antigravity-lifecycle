@@ -10,7 +10,7 @@ import {
   readSwarmBoard,
 } from "./server/detail.ts";
 import { ensureAntigravityHooksInstalled } from "./server/hooks.ts";
-import { inspectAgySession } from "./server/status.ts";
+import { clearStatusCaches, inspectAgySession } from "./server/status.ts";
 import {
   agyBoardSliceGet,
   agyChildTranscriptGet,
@@ -312,5 +312,6 @@ export default function contribute(server: PluginServerContext) {
     inFlightRefresh.clear();
     knownSessions.clear();
     clearTranscriptCache();
+    clearStatusCaches();
   };
 }
