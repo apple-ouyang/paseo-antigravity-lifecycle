@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
@@ -24,19 +24,38 @@ function stateLabelAndColor(
     case "canceled":
       return { label: "已取消", color: theme.colors.foregroundMuted };
     case "stopped":
-      return { label: "已停止", color: theme.colors.foregroundMuted };
+      return { label: "已归档", color: theme.colors.foregroundMuted };
   }
 }
 
-function renderStatusContent(
-  status: AgentBgStatus,
-  theme: PluginTheme,
-  onOpenConsole: () => void,
-) {
-  const members = status.swarm?.members ?? [];
-  const shownMembers = members.slice(0, MAX_SHOWN_MEMBERS);
-  const hiddenCount = members.length - shownMembers.length;
+function StatusContent({
+  status,
+  theme,
+  onOpenConsole,
+}: {
+  status: AgentBgStatus;
+  theme: PluginTheme;
+  onOpenConsole: () => void;
+}) {
+  const [showCompleted, setShowCompleted] = useState(false);
+  const allMembers = status.swarm?.members ?? [];
+  const liveMembers = allMembers.filter(
+    (m) => m.state === "working" || m.state === "waiting" || m.state === "failed",
+  );
+  const retiredCount = allMembers.length - liveMembers.length;
+  const shownMembers = (showCompleted ? allMembers : liveMembers).slice(0, MAX_SHOWN_MEMBERS);
+
   const tw = status.teamwork ?? null;
+  const liveTw = (tw?.nodes ?? []).filter((n) => n.state === "running" || n.state === "failed");
+  const shownTw = (showCompleted ? tw?.nodes ?? [] : liveTw).slice(0, 8);
+
+  const liveSubs = status.subagents.filter((s) => s.state === "running" || s.state === "failed");
+  const shownSubs = (showCompleted ? status.subagents : liveSubs).slice(0, MAX_SHOWN_MEMBERS);
+
+  const totalRetired =
+    retiredCount +
+    ((tw?.totalNodes ?? 0) - liveTw.length) +
+    (status.subagents.length - liveSubs.length);
 
   return (
     <View style={{ gap: 10, minWidth: 340, maxWidth: 480 }}>
@@ -101,43 +120,44 @@ function renderStatusContent(
         <View style={{ gap: 5, borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: 8 }}>
           <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
             Swarm{status.swarm.title ? `：${status.swarm.title}` : ""}（运行 {status.swarm.working} · 待命{" "}
-            {status.swarm.waiting} · 完成 {status.swarm.completed}
+            {status.swarm.waiting} · 已归档 {retiredCount}
             {status.swarm.latestSeq ? ` · #${status.swarm.latestSeq}` : ""}）
           </Text>
-          {shownMembers.map((member) => {
-            const badge = stateLabelAndColor(member.state, theme);
-            return (
-              <View key={member.name + member.conversationId} style={{ gap: 1 }}>
-                <View
-                  style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}
-                >
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
-                    <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "500" }} numberOfLines={1}>
-                      {member.name}
-                    </Text>
-                    {member.model ? (
-                      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
-                        {member.model}
-                      </Text>
-                    ) : null}
-                  </View>
-                  <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
-                    {badge.label}
-                  </Text>
-                </View>
-                {member.lastActivity ? (
-                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
-                    {member.lastActivity}
-                  </Text>
-                ) : null}
-              </View>
-            );
-          })}
-          {hiddenCount > 0 ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-              另有 {hiddenCount} 个成员，点击「打开控制台」查看完整消息板与日志
+          {shownMembers.length === 0 ? (
+            <Text style={{ color: theme.colors.statusSuccess, fontSize: 11 }}>
+              ✓ 全部 {allMembers.length} 个成员已完成
             </Text>
-          ) : null}
+          ) : (
+            shownMembers.map((member) => {
+              const badge = stateLabelAndColor(member.state, theme);
+              return (
+                <View key={member.name + member.conversationId} style={{ gap: 1 }}>
+                  <View
+                    style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
+                      <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "500" }} numberOfLines={1}>
+                        @{member.name}
+                      </Text>
+                      {member.model ? (
+                        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
+                          {member.model}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
+                      {badge.label}
+                    </Text>
+                  </View>
+                  {member.lastActivity ? (
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
+                      {member.lastActivity}
+                    </Text>
+                  ) : null}
+                </View>
+              );
+            })
+          )}
         </View>
       ) : null}
 
@@ -146,51 +166,44 @@ function renderStatusContent(
           <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
             Teamwork（运行 {tw.runningNodes} / 共 {tw.totalNodes} 节点 · 完成 {tw.completedNodes}）
           </Text>
-          {tw.nodes.slice(0, 8).map((node) => {
-            const badge = stateLabelAndColor(node.state, theme);
-            const indent = Math.min(node.depth ?? 0, 3) * 10;
-            return (
-              <View
-                key={node.id}
-                style={{
-                  marginLeft: indent,
-                  flexDirection: "row",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 10,
-                }}
-              >
-                <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
-                  {node.role}
-                </Text>
-                <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
-                  {badge.label}
-                </Text>
-              </View>
-            );
-          })}
-          {tw.nodes.length > 8 ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-              另有 {tw.nodes.length - 8} 个嵌套节点，点击「打开控制台」查看完整树
+          {shownTw.length === 0 ? (
+            <Text style={{ color: theme.colors.statusSuccess, fontSize: 11 }}>
+              ✓ 全部 {tw.totalNodes} 个节点已完成
             </Text>
-          ) : null}
+          ) : (
+            shownTw.map((node) => {
+              const badge = stateLabelAndColor(node.state, theme);
+              const indent = Math.min(node.depth ?? 0, 3) * 10;
+              return (
+                <View
+                  key={node.id}
+                  style={{
+                    marginLeft: indent,
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 10,
+                  }}
+                >
+                  <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
+                    {node.role}
+                  </Text>
+                  <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
+                    {badge.label}
+                  </Text>
+                </View>
+              );
+            })
+          )}
         </View>
       ) : null}
 
-      {status.plan && status.plan.total > 0 ? (
-        <View style={{ gap: 4, borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: 8 }}>
-          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
-            执行清单（{status.plan.completed}/{status.plan.total}）
-          </Text>
-        </View>
-      ) : null}
-
-      {status.subagents.length > 0 ? (
+      {shownSubs.length > 0 ? (
         <View style={{ gap: 5, borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: 8 }}>
           <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
-            子代理（{status.subagents.length}）
+            子代理（{liveSubs.length} 活跃 / 共 {status.subagents.length}）
           </Text>
-          {status.subagents.slice(0, MAX_SHOWN_MEMBERS).map((sub) => {
+          {shownSubs.map((sub) => {
             const badge = stateLabelAndColor(sub.state, theme);
             return (
               <View
@@ -229,6 +242,14 @@ function renderStatusContent(
           ))}
         </View>
       ) : null}
+
+      {totalRetired > 0 ? (
+        <Pressable onPress={() => setShowCompleted((v) => !v)}>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+            {showCompleted ? "▾ 隐藏已完成/已归档项" : `▸ 已隐藏 ${totalRetired} 个已完成项（点击展开）`}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -266,5 +287,5 @@ export function AgyLifecyclePopover(props: PluginButtonContentProps) {
       </View>
     );
   }
-  return renderStatusContent(status, props.theme, handleOpenConsole);
+  return <StatusContent status={status} theme={props.theme} onOpenConsole={handleOpenConsole} />;
 }

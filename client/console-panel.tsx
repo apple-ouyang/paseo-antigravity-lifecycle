@@ -20,7 +20,7 @@ import {
 } from "../shared/rpc.ts";
 import { getStatusSnapshot, subscribeStatus } from "./store.ts";
 
-type ConsoleTab = "overview" | "board" | "tree";
+type ConsoleTab = "overview" | "board" | "members" | "tree";
 
 interface SelectedChild {
   conversationId: string;
@@ -50,6 +50,24 @@ const TEAMWORK_PHASES: Array<{ key: TeamworkPhase; label: string }> = [
   { key: "completed", label: "完成" },
 ];
 
+const ROLE_WORKER_RE = /^(?:narrator|monitor)(?:-\d+)?$/i;
+
+function isRoleWorker(name: string): boolean {
+  return ROLE_WORKER_RE.test(name);
+}
+
+function isMemberDoneOrRetired(member: SwarmMember): boolean {
+  return (
+    member.state === "completed" ||
+    member.state === "canceled" ||
+    member.state === "stopped"
+  );
+}
+
+function isMemberActive(member: SwarmMember): boolean {
+  return member.state === "working" || member.state === "failed";
+}
+
 function stateMeta(
   state: SwarmMember["state"] | SubagentItem["state"] | "running" | "completed" | "failed",
   theme: PluginTheme,
@@ -67,7 +85,7 @@ function stateMeta(
     case "canceled":
       return { label: "已取消", color: theme.colors.foregroundMuted };
     case "stopped":
-      return { label: "已停止", color: theme.colors.foregroundMuted };
+      return { label: "已归档", color: theme.colors.foregroundMuted };
   }
 }
 
@@ -121,7 +139,14 @@ function stepKindColor(kind: TranscriptStep["kind"], theme: PluginTheme): string
 function shortWorkspace(p: string | null | undefined): string | null {
   if (!p) return null;
   const parts = p.split("/").filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : p;
+  return parts.length >= 2 ? `…/${parts.slice(-2).join("/")}` : parts[0] ?? p;
+}
+
+function stripDonePrefix(text: string): string {
+  return text
+    .replace(/^(?:@[a-z0-9_-]+[\s,:–—-]*)+/i, "")
+    .replace(/^(?:\*\*|\*|`|_)?\[done\](?:\*\*|\*|`|_)?[\s:,.–—-]*/i, "")
+    .trim();
 }
 
 function Chip({
@@ -163,6 +188,72 @@ function Chip({
   return <Pressable onPress={onPress}>{inner}</Pressable>;
 }
 
+function DisclosureBar({
+  title,
+  count,
+  open,
+  accentColor,
+  theme,
+  onToggle,
+  children,
+}: {
+  title: string;
+  count: string;
+  open: boolean;
+  accentColor?: string;
+  theme: PluginTheme;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <View
+      style={{
+        backgroundColor: theme.colors.surface1,
+        borderColor: theme.colors.border,
+        borderWidth: 1,
+        borderRadius: 9,
+        overflow: "hidden",
+      }}
+    >
+      <Pressable
+        onPress={onToggle}
+        style={{
+          flexDirection: "row",
+          justifyContent: "space-between",
+          alignItems: "center",
+          paddingHorizontal: 12,
+          paddingVertical: 9,
+          gap: 8,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
+          <Text style={{ color: accentColor ?? theme.colors.foregroundMuted, fontSize: 11 }}>
+            {open ? "▾" : "▸"}
+          </Text>
+          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }} numberOfLines={1}>
+            {title}
+          </Text>
+        </View>
+        <Text style={{ color: accentColor ?? theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600" }}>
+          {count}
+        </Text>
+      </Pressable>
+      {open ? (
+        <View
+          style={{
+            borderTopWidth: 1,
+            borderTopColor: theme.colors.border,
+            padding: 10,
+            gap: 6,
+          }}
+        >
+          {children}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function SectionCard({
   title,
   right,
@@ -193,6 +284,87 @@ function SectionCard({
       </View>
       {children}
     </View>
+  );
+}
+
+function MemberRow({
+  member,
+  taskDesc,
+  theme,
+  onOpen,
+}: {
+  member: SwarmMember;
+  taskDesc?: string;
+  theme: PluginTheme;
+  onOpen: () => void;
+}) {
+  const meta = stateMeta(member.state, theme);
+  const retired = isMemberDoneOrRetired(member);
+  const cleanAct = member.lastActivity ? stripDonePrefix(member.lastActivity) : null;
+  return (
+    <Pressable
+      disabled={!member.conversationId}
+      onPress={onOpen}
+      style={{
+        backgroundColor: theme.colors.surface2,
+        borderColor: theme.colors.border,
+        borderWidth: 1,
+        borderRadius: 7,
+        paddingHorizontal: 10,
+        paddingVertical: 8,
+        gap: 3,
+        opacity: retired ? 0.8 : 1,
+      }}
+    >
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
+          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }} numberOfLines={1}>
+            @{member.name}
+          </Text>
+          {member.workspaceMode && member.workspaceMode !== "inherit" ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+              {member.workspaceMode}
+            </Text>
+          ) : null}
+          {member.model ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
+              {member.model}
+            </Text>
+          ) : null}
+        </View>
+        <Text style={{ color: meta.color, fontSize: 11, fontWeight: "600" }}>{meta.label}</Text>
+      </View>
+
+      {taskDesc ? (
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={1}>
+          {taskDesc}
+        </Text>
+      ) : null}
+
+      {cleanAct ? (
+        <Text
+          style={{
+            color: member.state === "working" ? theme.colors.accent : theme.colors.foregroundMuted,
+            fontSize: 11,
+          }}
+          numberOfLines={1}
+        >
+          {cleanAct}
+        </Text>
+      ) : null}
+
+      {member.workspace || member.stepCount ? (
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
+          {[
+            shortWorkspace(member.workspace),
+            member.stepCount ? `${member.stepCount} 步` : null,
+            member.conversationId ? "点击查看日志 →" : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </Text>
+      ) : null}
+    </Pressable>
   );
 }
 
@@ -296,16 +468,26 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   const [tab, setTab] = useState<ConsoleTab>("overview");
   const [tabInitialized, setTabInitialized] = useState(false);
 
+  // Official hive.js-style progressive disclosure states (completed/retired collapsed by default!)
+  const [whoFilter, setWhoFilter] = useState<string | null>(null);
+  const [doneTasksOpen, setDoneTasksOpen] = useState(false);
+  const [doneThreadsOpen, setDoneThreadsOpen] = useState(false);
+  const [expandedThreads, setExpandedThreads] = useState<Record<string, boolean>>({});
+  const [retiredMembersOpen, setRetiredMembersOpen] = useState(false);
+  const [memberSearch, setMemberSearch] = useState("");
+  const [donePlanOpen, setDonePlanOpen] = useState(false);
+
   // Board tab controls
   const [boardFilter, setBoardFilter] = useState<string>("all");
+  const [boardSearch, setBoardSearch] = useState("");
   const [boardNewestFirst, setBoardNewestFirst] = useState(true);
   const [composeTarget, setComposeTarget] = useState<string>("coordinator");
   const [composeText, setComposeText] = useState("");
   const [sending, setSending] = useState(false);
   const [sendFeedback, setSendFeedback] = useState<string | null>(null);
 
-  // Tree tab controls
-  const [onlyRunning, setOnlyRunning] = useState(false);
+  // Teamwork / subagent tree controls (default hides completed!)
+  const [showCompletedTree, setShowCompletedTree] = useState(false);
 
   // Child transcript drill-down
   const [selectedChild, setSelectedChild] = useState<SelectedChild | null>(null);
@@ -326,7 +508,6 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     }
   }, [agentId, fetchConsole]);
 
-  // Reload whenever live watch status changes (boardCount, states, observedAt)
   const statusFingerprint = liveStatus
     ? `${liveStatus.observedAt}:${liveStatus.swarm?.latestSeq ?? 0}:${liveStatus.swarm?.working ?? 0}:${liveStatus.teamwork?.runningNodes ?? 0}:${liveStatus.subagents.length}`
     : "none";
@@ -346,7 +527,6 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   const swarmPlan = detail?.swarmPlan ?? null;
   const boardPosts = detail?.boardPosts ?? [];
 
-  // Default to the most relevant tab once data arrives
   useEffect(() => {
     if (tabInitialized || !status) return;
     setTabInitialized(true);
@@ -357,7 +537,6 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     }
   }, [status, tabInitialized]);
 
-  // Load child transcript when a child node is selected (and poll while running)
   const loadChild = useCallback(
     async (child: SelectedChild) => {
       setChildLoading(true);
@@ -391,33 +570,119 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     return () => clearInterval(timer);
   }, [selectedChild, loadChild]);
 
+  // Partition Swarm members just like official hive.js (exclude role workers monitor/narrator from task team)
+  const swarmPartitions = useMemo(() => {
+    const all = (swarm?.members ?? []).filter((m) => !isRoleWorker(m.name));
+    const live = all.filter((m) => !isMemberDoneOrRetired(m));
+    const active = live.filter((m) => isMemberActive(m));
+    const standby = live.filter((m) => !isMemberActive(m));
+    const retired = all.filter((m) => isMemberDoneOrRetired(m));
+    const finished = all.length > 0 && live.length === 0;
+    return { all, live, active, standby, retired, finished };
+  }, [swarm]);
+
+  // Partition threads into open (active/waiting/failed) vs done (collapsed by default)
+  const threadPartitions = useMemo(() => {
+    if (!swarmPlan?.threads?.length) {
+      return { open: [], done: [] };
+    }
+    const memberMap = new Map((swarm?.members ?? []).map((m) => [m.name, m]));
+    const open: Array<{
+      id: string;
+      title: string;
+      goal: string;
+      members: SwarmMember[];
+      doneCount: number;
+      totalCount: number;
+      hasIssue: boolean;
+      hasActive: boolean;
+    }> = [];
+    const done: typeof open = [];
+
+    for (const th of swarmPlan.threads) {
+      const thMembers = th.tasks
+        .map((n) => memberMap.get(n))
+        .filter((m): m is SwarmMember => Boolean(m))
+        .filter((m) => !whoFilter || m.name === whoFilter);
+      if (whoFilter && thMembers.length === 0) continue;
+      const doneCount = thMembers.filter((m) => isMemberDoneOrRetired(m)).length;
+      const hasIssue = thMembers.some((m) => m.state === "failed");
+      const hasActive = thMembers.some((m) => m.state === "working" || m.state === "waiting");
+      const row = {
+        id: th.id,
+        title: th.title,
+        goal: th.goal,
+        members: thMembers,
+        doneCount,
+        totalCount: thMembers.length,
+        hasIssue,
+        hasActive,
+      };
+      if (thMembers.length > 0 && doneCount === thMembers.length && !hasIssue) {
+        done.push(row);
+      } else {
+        open.push(row);
+      }
+    }
+    open.sort((a, b) => Number(b.hasIssue) - Number(a.hasIssue) || Number(b.hasActive) - Number(a.hasActive));
+    return { open, done };
+  }, [swarmPlan, swarm, whoFilter]);
+
   const memberNames = useMemo(() => {
     const names = new Set<string>(["coordinator"]);
-    for (const m of swarm?.members ?? []) names.add(m.name);
+    for (const m of swarmPartitions.live) names.add(m.name);
+    for (const m of swarmPartitions.retired) names.add(m.name);
     for (const p of boardPosts) names.add(p.agent);
     return [...names];
-  }, [swarm, boardPosts]);
+  }, [swarmPartitions, boardPosts]);
 
   const filteredPosts = useMemo(() => {
-    const base =
-      boardFilter === "all"
-        ? boardPosts
-        : boardPosts.filter(
-            (p) => p.agent === boardFilter || p.mentions.includes(boardFilter.toLowerCase()),
-          );
+    const q = boardSearch.trim().toLowerCase();
+    const base = boardPosts.filter((p) => {
+      if (
+        boardFilter !== "all" &&
+        p.agent !== boardFilter &&
+        !p.mentions.includes(boardFilter.toLowerCase())
+      ) {
+        return false;
+      }
+      if (q && !p.text.toLowerCase().includes(q) && !p.agent.toLowerCase().includes(q)) {
+        return false;
+      }
+      return true;
+    });
     return boardNewestFirst ? [...base].reverse() : base;
-  }, [boardPosts, boardFilter, boardNewestFirst]);
+  }, [boardPosts, boardFilter, boardSearch, boardNewestFirst]);
 
-  const allTreeNodes = useMemo(() => {
-    const list: Array<{ group: "teamwork" | "subagent"; node: SubagentItem }> = [];
-    for (const n of teamwork?.nodes ?? []) {
-      list.push({ group: "teamwork", node: n });
-    }
-    for (const s of subagents) {
-      list.push({ group: "subagent", node: s });
-    }
-    return onlyRunning ? list.filter((x) => x.node.state === "running") : list;
-  }, [teamwork, subagents, onlyRunning]);
+  const treePartitions = useMemo(() => {
+    const all: Array<{ group: "teamwork" | "subagent"; node: SubagentItem }> = [];
+    for (const n of teamwork?.nodes ?? []) all.push({ group: "teamwork", node: n });
+    for (const s of subagents) all.push({ group: "subagent", node: s });
+    const active = all.filter((x) => x.node.state === "running" || x.node.state === "failed");
+    const completed = all.filter((x) => x.node.state !== "running" && x.node.state !== "failed");
+    return { all, active, completed };
+  }, [teamwork, subagents]);
+
+  const openMemberLog = (member: SwarmMember) => {
+    if (!member.conversationId) return;
+    setSelectedChild({
+      conversationId: member.conversationId,
+      label: `@${member.name}`,
+      subtitle: member.model,
+      running: member.state === "working",
+      workspace: member.workspace ?? null,
+    });
+  };
+
+  const openSubagentLog = (node: SubagentItem) => {
+    setSelectedChild({
+      conversationId: node.id,
+      label: node.role,
+      subtitle: `${node.typeName}${node.model ? ` · ${node.model}` : ""}`,
+      running: node.state === "running",
+      workspace: node.workspace ?? null,
+    });
+  };
 
   const handleSendDirective = async () => {
     const body = composeText.trim();
@@ -516,7 +781,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
               selectedChild.subtitle,
               childModel,
               childTotal > 0 ? `共 ${childTotal} 步（显示最近 ${childSteps.length} 步）` : null,
-              selectedChild.workspace ? `工作区: ${shortWorkspace(selectedChild.workspace)}` : null,
+              selectedChild.workspace ? shortWorkspace(selectedChild.workspace) : null,
             ]
               .filter(Boolean)
               .join(" · ")}
@@ -574,9 +839,25 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     );
   }
 
+  const runningForWho = swarmPartitions.active.filter((m) => !whoFilter || m.name === whoFilter);
+  const doneForWho = swarmPartitions.retired.filter((m) => !whoFilter || m.name === whoFilter);
+  const totalTasks = swarmPartitions.all.length;
+  const doneTasksCount = swarmPartitions.retired.length;
+
+  const memberSearchQ = memberSearch.trim().toLowerCase();
+  const matchMember = (m: SwarmMember) =>
+    !memberSearchQ ||
+    m.name.toLowerCase().includes(memberSearchQ) ||
+    (m.model ?? "").toLowerCase().includes(memberSearchQ) ||
+    (m.lastActivity ?? "").toLowerCase().includes(memberSearchQ);
+
+  const visibleActiveMembers = swarmPartitions.active.filter(matchMember);
+  const visibleStandbyMembers = swarmPartitions.standby.filter(matchMember);
+  const visibleRetiredMembers = swarmPartitions.retired.filter(matchMember);
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
-      {/* Header */}
+      {/* Header matching official Swarm Board chrome */}
       <View
         style={{
           paddingHorizontal: 14,
@@ -589,16 +870,23 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
       >
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
           <Text style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "700", flexShrink: 1 }} numberOfLines={1}>
-            {swarm?.title ?? (teamwork ? "Teamwork 编排控制台" : "Antigravity 控制台")}
+            {swarm?.title ?? (teamwork ? "Teamwork 控制台" : "Antigravity 控制台")}
           </Text>
-          <Pressable onPress={() => void reloadConsole()}>
-            <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>刷新</Text>
-          </Pressable>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            {status.backgroundActive ? (
+              <Text style={{ color: theme.colors.statusSuccess, fontSize: 11, fontWeight: "600" }}>
+                ● Live
+              </Text>
+            ) : (
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>已静默</Text>
+            )}
+            <Pressable onPress={() => void reloadConsole()}>
+              <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>刷新</Text>
+            </Pressable>
+          </View>
         </View>
 
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{status.summaryLine}</Text>
-
-        {/* Active mode chips */}
+        {/* Active mode pills */}
         {modes.length > 0 ? (
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
             {modes.map((m) => (
@@ -618,8 +906,8 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
           </View>
         ) : null}
 
-        {/* Navigation tabs */}
-        <View style={{ flexDirection: "row", gap: 6 }}>
+        {/* Official tabs: Overview / Board / Members + Tree (for Teamwork & Subagents) */}
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
           <Chip
             label="总览"
             color={theme.colors.foreground}
@@ -636,9 +924,26 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
               onPress={() => setTab("board")}
             />
           ) : null}
+          {swarm ? (
+            <Chip
+              label={
+                swarmPartitions.live.length > 0
+                  ? `成员 (${swarmPartitions.live.length})`
+                  : `成员 (0 活跃)`
+              }
+              color={theme.colors.foreground}
+              theme={theme}
+              active={tab === "members"}
+              onPress={() => setTab("members")}
+            />
+          ) : null}
           {teamwork || subagents.length > 0 ? (
             <Chip
-              label={`成员树 (${(teamwork?.totalNodes ?? 0) + subagents.length})`}
+              label={
+                treePartitions.active.length > 0
+                  ? `层级树 (${treePartitions.active.length} 活跃)`
+                  : `层级树 (${treePartitions.all.length})`
+              }
               color={theme.colors.foreground}
               theme={theme}
               active={tab === "tree"}
@@ -648,263 +953,281 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         </View>
       </View>
 
-      {/* Body */}
+      {/* TAB 1: OVERVIEW (Official hive.js layout: Goal -> Running -> Collapsed Progress -> Open Threads -> Collapsed Done Threads -> Live Team filter) */}
       {tab === "overview" ? (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 12 }}>
-          {/* Swarm Goal & Threads */}
-          {swarm ? (
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 10 }}>
+          {/* 1. Goal card (compact 2 lines) */}
+          {swarmPlan?.goal ? (
+            <View
+              style={{
+                backgroundColor: theme.colors.surface1,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                borderRadius: 10,
+                padding: 12,
+                gap: 3,
+              }}
+            >
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10, fontWeight: "700" }}>
+                GOAL
+              </Text>
+              <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "700" }}>
+                {swarmPlan.goal.title}
+              </Text>
+              {swarmPlan.goal.line ? (
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+                  {swarmPlan.goal.line}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* 2. Running now (hidden when nothing is running or swarm is finished, matching hive.js!) */}
+          {swarm && !swarmPartitions.finished && runningForWho.length > 0 ? (
             <SectionCard
-              title="Swarm 蜂群态势"
-              right={`运行 ${swarm.working} · 待命 ${swarm.waiting} · 完成 ${swarm.completed}${swarm.latestSeq ? ` · #${swarm.latestSeq}` : ""}`}
+              title="进行中"
+              right={`${runningForWho.length} 个成员运行中`}
               theme={theme}
             >
-              {swarmPlan?.goal ? (
-                <View
-                  style={{
-                    backgroundColor: theme.colors.surface2,
-                    borderRadius: 7,
-                    padding: 9,
-                    gap: 2,
-                  }}
-                >
-                  <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "700" }}>
-                    {swarmPlan.goal.title}
-                  </Text>
-                  {swarmPlan.goal.line ? (
-                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-                      {swarmPlan.goal.line}
-                    </Text>
-                  ) : null}
-                </View>
-              ) : null}
-
-              {/* Threads from plan.json if present */}
-              {swarmPlan && swarmPlan.threads.length > 0 ? (
-                <View style={{ gap: 8 }}>
-                  {swarmPlan.threads.map((th) => (
-                    <View
-                      key={th.id}
-                      style={{
-                        borderColor: theme.colors.border,
-                        borderWidth: 1,
-                        borderRadius: 8,
-                        padding: 9,
-                        gap: 6,
-                      }}
-                    >
-                      <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "700" }}>
-                        {th.title}
-                      </Text>
-                      {th.goal ? (
-                        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{th.goal}</Text>
-                      ) : null}
-                      {th.tasks.map((memberName) => {
-                        const member = swarm.members.find((m) => m.name === memberName);
-                        const taskDesc = swarmPlan.tasks[memberName];
-                        const meta = member
-                          ? stateMeta(member.state, theme)
-                          : { label: "未启动", color: theme.colors.foregroundMuted };
-                        const unread =
-                          member &&
-                          typeof swarm.latestSeq === "number" &&
-                          typeof member.lastReadSeq === "number" &&
-                          swarm.latestSeq > member.lastReadSeq
-                            ? swarm.latestSeq - member.lastReadSeq
-                            : 0;
-                        return (
-                          <Pressable
-                            key={memberName}
-                            disabled={!member?.conversationId}
-                            onPress={() => {
-                              if (!member?.conversationId) return;
-                              setSelectedChild({
-                                conversationId: member.conversationId,
-                                label: `Swarm Worker: ${member.name}`,
-                                subtitle: member.model,
-                                running: member.state === "working",
-                                workspace: member.workspace ?? null,
-                              });
-                            }}
-                            style={{
-                              backgroundColor: theme.colors.surface2,
-                              borderRadius: 6,
-                              padding: 8,
-                              gap: 3,
-                            }}
-                          >
-                            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                              <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
-                                @{memberName}
-                              </Text>
-                              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                                {unread > 0 ? (
-                                  <Text style={{ color: theme.colors.statusWarning, fontSize: 10 }}>
-                                    滞后 {unread} 帖
-                                  </Text>
-                                ) : null}
-                                <Text style={{ color: meta.color, fontSize: 11, fontWeight: "600" }}>
-                                  {meta.label}
-                                </Text>
-                              </View>
-                            </View>
-                            {taskDesc ? (
-                              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={2}>
-                                {taskDesc}
-                              </Text>
-                            ) : null}
-                            {member?.lastActivity ? (
-                              <Text style={{ color: theme.colors.accent, fontSize: 11 }} numberOfLines={1}>
-                                最新：{member.lastActivity}
-                              </Text>
-                            ) : null}
-                            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
-                              {[
-                                member?.model,
-                                member?.workspaceMode,
-                                shortWorkspace(member?.workspace),
-                                member?.stepCount ? `${member.stepCount} 步` : null,
-                                member?.conversationId ? "点击查看实时日志 →" : null,
-                              ]
-                                .filter(Boolean)
-                                .join(" · ")}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                  ))}
-                </View>
-              ) : null}
-
-              {/* All Swarm members (including historical / killed or when no plan.json) */}
-              <View style={{ gap: 6 }}>
-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600" }}>
-                  全部成员（{swarm.members.length}，点击查看实时日志）
-                </Text>
-                {swarm.members.map((member) => {
-                  const meta = stateMeta(member.state, theme);
-                  return (
-                    <Pressable
-                      key={member.name + member.conversationId}
-                      disabled={!member.conversationId}
-                      onPress={() => {
-                        if (!member.conversationId) return;
-                        setSelectedChild({
-                          conversationId: member.conversationId,
-                          label: `Swarm Worker: ${member.name}`,
-                          subtitle: member.model,
-                          running: member.state === "working",
-                          workspace: member.workspace ?? null,
-                        });
-                      }}
-                      style={{
-                        borderColor: theme.colors.border,
-                        borderWidth: 1,
-                        borderRadius: 7,
-                        padding: 8,
-                        gap: 3,
-                      }}
-                    >
-                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
-                          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
-                            {member.name}
-                          </Text>
-                          {member.workspaceMode ? (
-                            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
-                              [{member.workspaceMode}]
-                            </Text>
-                          ) : null}
-                          {member.model ? (
-                            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
-                              {member.model}
-                            </Text>
-                          ) : null}
-                        </View>
-                        <Text style={{ color: meta.color, fontSize: 11, fontWeight: "600" }}>
-                          {meta.label}
-                        </Text>
-                      </View>
-                      {member.lastActivity ? (
-                        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={1}>
-                          {member.lastActivity}
-                        </Text>
-                      ) : null}
-                    </Pressable>
-                  );
-                })}
-              </View>
+              {runningForWho.map((m) => (
+                <MemberRow
+                  key={m.name + m.conversationId}
+                  member={m}
+                  taskDesc={swarmPlan?.tasks[m.name]}
+                  theme={theme}
+                  onOpen={() => openMemberLog(m)}
+                />
+              ))}
             </SectionCard>
           ) : null}
 
-          {/* Teamwork Pipeline Overview */}
-          {teamwork ? (
+          {/* 3. Progress disclosure bar (all completed/retired tasks collapsed by default!) */}
+          {swarm && totalTasks > 0 ? (
+            <DisclosureBar
+              title={
+                swarmPartitions.finished
+                  ? `✓ ${doneTasksCount} / ${totalTasks} 项任务已全部完成`
+                  : `${doneTasksCount} / ${totalTasks} 项任务已完成`
+              }
+              count={
+                swarmPartitions.live.length > 0
+                  ? `${swarmPartitions.active.length} 运行 · ${swarmPartitions.standby.length} 待命`
+                  : "已归档"
+              }
+              accentColor={
+                swarmPartitions.finished ? theme.colors.statusSuccess : theme.colors.accent
+              }
+              open={doneTasksOpen}
+              theme={theme}
+              onToggle={() => setDoneTasksOpen((v) => !v)}
+            >
+              {doneForWho.length === 0 ? (
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                  暂无已完成的任务。
+                </Text>
+              ) : (
+                doneForWho.map((m) => (
+                  <MemberRow
+                    key={m.name + m.conversationId}
+                    member={m}
+                    taskDesc={swarmPlan?.tasks[m.name]}
+                    theme={theme}
+                    onOpen={() => openMemberLog(m)}
+                  />
+                ))
+              )}
+            </DisclosureBar>
+          ) : null}
+
+          {/* 4. Open Threads (only active/issue threads shown prominently; tasks expand only when needed) */}
+          {threadPartitions.open.length > 0 ? (
+            <View style={{ gap: 8 }}>
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "700" }}>
+                进行中线程（{threadPartitions.open.length}）
+              </Text>
+              {threadPartitions.open.map((th) => {
+                const isOpen = expandedThreads[th.id] ?? (th.hasIssue || th.hasActive);
+                return (
+                  <DisclosureBar
+                    key={th.id}
+                    title={th.title}
+                    count={`${th.doneCount}/${th.totalCount}`}
+                    accentColor={th.hasIssue ? theme.colors.statusDanger : theme.colors.accent}
+                    open={isOpen}
+                    theme={theme}
+                    onToggle={() =>
+                      setExpandedThreads((prev) => ({ ...prev, [th.id]: !isOpen }))
+                    }
+                  >
+                    {th.goal ? (
+                      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                        {th.goal}
+                      </Text>
+                    ) : null}
+                    {th.members.map((m) => (
+                      <MemberRow
+                        key={m.name + m.conversationId}
+                        member={m}
+                        taskDesc={swarmPlan?.tasks[m.name]}
+                        theme={theme}
+                        onOpen={() => openMemberLog(m)}
+                      />
+                    ))}
+                  </DisclosureBar>
+                );
+              })}
+            </View>
+          ) : null}
+
+          {/* 5. Completed Threads (collapsed by default so finished work never clutters the view!) */}
+          {threadPartitions.done.length > 0 ? (
+            <DisclosureBar
+              title={`已完成线程（已折叠，点击查看）`}
+              count={`${threadPartitions.done.length} 个`}
+              accentColor={theme.colors.statusSuccess}
+              open={doneThreadsOpen}
+              theme={theme}
+              onToggle={() => setDoneThreadsOpen((v) => !v)}
+            >
+              {threadPartitions.done.map((th) => (
+                <View
+                  key={th.id}
+                  style={{
+                    borderColor: theme.colors.border,
+                    borderWidth: 1,
+                    borderRadius: 7,
+                    padding: 8,
+                    gap: 4,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600", flex: 1 }}>
+                      ✓ {th.title}
+                    </Text>
+                    <Text style={{ color: theme.colors.statusSuccess, fontSize: 11 }}>
+                      {th.doneCount}/{th.totalCount}
+                    </Text>
+                  </View>
+                  {th.members.map((m) => (
+                    <Pressable
+                      key={m.name + m.conversationId}
+                      onPress={() => openMemberLog(m)}
+                      style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 2 }}
+                    >
+                      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                        @{m.name} · {swarmPlan?.tasks[m.name] ?? "查看日志"}
+                      </Text>
+                      <Text style={{ color: theme.colors.accent, fontSize: 10 }}>日志 →</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ))}
+            </DisclosureBar>
+          ) : null}
+
+          {/* 6. Live Team quick-filter strip (official hive.js hides killed members here!) */}
+          {swarm && swarmPartitions.live.length > 0 ? (
             <SectionCard
-              title="Teamwork 流水线"
-              right={`运行 ${teamwork.runningNodes} / 共 ${teamwork.totalNodes} 节点 · 完成 ${teamwork.completedNodes}${teamwork.failedNodes > 0 ? ` · 失败 ${teamwork.failedNodes}` : ""}`}
+              title="在线团队"
+              right={`${swarmPartitions.live.length} 人在线（按成员筛选）`}
               theme={theme}
             >
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                {TEAMWORK_PHASES.map((p) => {
-                  const isCurrent = teamwork.phase === p.key;
-                  return (
-                    <Chip
-                      key={p.key}
-                      label={p.label}
-                      color={isCurrent ? theme.colors.accent : theme.colors.foregroundMuted}
-                      theme={theme}
-                      active={isCurrent}
-                    />
-                  );
-                })}
+                <Chip
+                  label="全部"
+                  color={theme.colors.foreground}
+                  theme={theme}
+                  active={whoFilter === null}
+                  onPress={() => setWhoFilter(null)}
+                />
+                {swarmPartitions.live.map((m) => (
+                  <Chip
+                    key={m.name}
+                    label={`@${m.name}`}
+                    color={m.state === "working" ? theme.colors.accent : theme.colors.statusWarning}
+                    theme={theme}
+                    active={whoFilter === m.name}
+                    onPress={() => setWhoFilter((prev) => (prev === m.name ? null : m.name))}
+                  />
+                ))}
               </View>
-              {teamwork.nodes
-                .filter((n) => n.state === "running")
-                .slice(0, 6)
-                .map((node) => {
-                  const cat = categoryMeta(node.category, theme);
-                  return (
-                    <Pressable
-                      key={node.id}
-                      onPress={() =>
-                        setSelectedChild({
-                          conversationId: node.id,
-                          label: node.role,
-                          subtitle: `${node.typeName}${node.model ? ` · ${node.model}` : ""}`,
-                          running: node.state === "running",
-                          workspace: node.workspace ?? null,
-                        })
-                      }
-                      style={{
-                        backgroundColor: theme.colors.surface2,
-                        borderRadius: 6,
-                        padding: 8,
-                        gap: 2,
-                      }}
-                    >
-                      <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
-                        <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600", flexShrink: 1 }} numberOfLines={1}>
-                          [{cat.label}] {node.role}
-                        </Text>
-                        <Text style={{ color: theme.colors.accent, fontSize: 11 }}>运行中 →</Text>
-                      </View>
-                      {node.lastActivity ? (
-                        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={1}>
-                          {node.lastActivity}
-                        </Text>
-                      ) : null}
-                    </Pressable>
-                  );
-                })}
-              <Pressable onPress={() => setTab("tree")}>
-                <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "600" }}>
-                  查看完整 Teamwork 层级树 ({teamwork.totalNodes} 节点) →
-                </Text>
-              </Pressable>
             </SectionCard>
           ) : null}
 
-          {/* /goal status */}
+          {/* Teamwork summary (active nodes prominent; finished collapsed) */}
+          {teamwork ? (
+            teamwork.active || teamwork.failedNodes > 0 ? (
+              <SectionCard
+                title="Teamwork 流水线"
+                right={`运行 ${teamwork.runningNodes} · 完成 ${teamwork.completedNodes}/${teamwork.totalNodes}`}
+                theme={theme}
+              >
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                  {TEAMWORK_PHASES.map((p) => (
+                    <Chip
+                      key={p.key}
+                      label={p.label}
+                      color={teamwork.phase === p.key ? theme.colors.accent : theme.colors.foregroundMuted}
+                      theme={theme}
+                      active={teamwork.phase === p.key}
+                    />
+                  ))}
+                </View>
+                {teamwork.nodes
+                  .filter((n) => n.state === "running" || n.state === "failed")
+                  .slice(0, 6)
+                  .map((node) => {
+                    const cat = categoryMeta(node.category, theme);
+                    const meta = stateMeta(node.state, theme);
+                    return (
+                      <Pressable
+                        key={node.id}
+                        onPress={() => openSubagentLog(node)}
+                        style={{
+                          backgroundColor: theme.colors.surface2,
+                          borderRadius: 6,
+                          padding: 8,
+                          gap: 2,
+                        }}
+                      >
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
+                          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600", flex: 1 }} numberOfLines={1}>
+                            [{cat.label}] {node.role}
+                          </Text>
+                          <Text style={{ color: meta.color, fontSize: 11, fontWeight: "600" }}>{meta.label}</Text>
+                        </View>
+                        {node.lastActivity ? (
+                          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={1}>
+                            {node.lastActivity}
+                          </Text>
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
+                <Pressable onPress={() => setTab("tree")}>
+                  <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "600" }}>
+                    查看 Teamwork 层级树 →
+                  </Text>
+                </Pressable>
+              </SectionCard>
+            ) : (
+              <DisclosureBar
+                title={`✓ Teamwork 已完成（共 ${teamwork.totalNodes} 节点）`}
+                count="点击切换层级树"
+                accentColor={theme.colors.statusSuccess}
+                open={false}
+                theme={theme}
+                onToggle={() => {
+                  setShowCompletedTree(true);
+                  setTab("tree");
+                }}
+              >
+                <View />
+              </DisclosureBar>
+            )
+          ) : null}
+
+          {/* /goal active card */}
           {status.goalActive ? (
             <SectionCard title="/goal 目标循环" right="Stop Hook 保活中" theme={theme}>
               <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
@@ -913,119 +1236,88 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             </SectionCard>
           ) : null}
 
-          {/* Plan checklist */}
+          {/* Plan checklist (collapse done steps when all finished) */}
           {plan ? (
-            <SectionCard
-              title={plan.inPlanMode ? "规划模式（进行中）" : "执行步骤清单"}
-              right={plan.total > 0 ? `${plan.completed}/${plan.total}` : undefined}
-              theme={theme}
-            >
-              {plan.steps.length === 0 ? (
-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-                  当前处于 Plan 模式，尚未提交步骤列表。
-                </Text>
-              ) : (
-                plan.steps.map((s, idx) => (
-                  <View key={`${idx}-${s.title}`} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <Text
-                      style={{
-                        color:
-                          s.status === "done"
-                            ? theme.colors.statusSuccess
-                            : s.status === "in_progress"
+            plan.inPlanMode || plan.completed < plan.total ? (
+              <SectionCard
+                title={plan.inPlanMode ? "规划模式（进行中）" : "执行步骤清单"}
+                right={plan.total > 0 ? `${plan.completed}/${plan.total}` : undefined}
+                theme={theme}
+              >
+                {plan.steps
+                  .filter((s) => s.status !== "done" && s.status !== "skipped")
+                  .map((s, idx) => (
+                    <View key={`${idx}-${s.title}`} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      <Text
+                        style={{
+                          color:
+                            s.status === "in_progress"
                               ? theme.colors.accent
                               : s.status === "failed"
                                 ? theme.colors.statusDanger
                                 : theme.colors.foregroundMuted,
-                        fontSize: 12,
-                        width: 14,
-                      }}
-                    >
-                      {s.status === "done"
-                        ? "✓"
-                        : s.status === "in_progress"
-                          ? "◐"
-                          : s.status === "failed"
-                            ? "✕"
-                            : "○"}
-                    </Text>
-                    <Text
-                      style={{
-                        color:
-                          s.status === "done" || s.status === "skipped"
-                            ? theme.colors.foregroundMuted
-                            : theme.colors.foreground,
-                        fontSize: 12,
-                        flex: 1,
-                      }}
-                    >
-                      {s.title}
-                    </Text>
-                  </View>
-                ))
-              )}
-            </SectionCard>
-          ) : null}
-
-          {/* Workflows */}
-          {workflows.length > 0 ? (
-            <SectionCard title="Python Workflow 编排" right={`${workflows.length} 次运行`} theme={theme}>
-              {workflows.map((wf) => {
-                const meta = stateMeta(wf.status, theme);
-                return (
-                  <View
-                    key={wf.id}
-                    style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}
-                  >
-                    <Text style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }} numberOfLines={1}>
-                      {wf.description}
-                    </Text>
-                    <Text style={{ color: meta.color, fontSize: 11, fontWeight: "600" }}>{meta.label}</Text>
-                  </View>
-                );
-              })}
-            </SectionCard>
-          ) : null}
-
-          {/* Regular subagents & background tasks */}
-          {subagents.length > 0 ? (
-            <SectionCard title="常规子代理" right={`${subagents.length} 个`} theme={theme}>
-              {subagents.slice(0, 8).map((s) => {
-                const meta = stateMeta(s.state, theme);
-                return (
-                  <Pressable
-                    key={s.id}
-                    onPress={() =>
-                      setSelectedChild({
-                        conversationId: s.id,
-                        label: s.role,
-                        subtitle: `${s.typeName}${s.model ? ` · ${s.model}` : ""}`,
-                        running: s.state === "running",
-                        workspace: s.workspace ?? null,
-                      })
-                    }
-                    style={{
-                      flexDirection: "row",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 8,
-                      paddingVertical: 3,
-                    }}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ color: theme.colors.foreground, fontSize: 12 }} numberOfLines={1}>
-                        {s.role} ({s.typeName})
+                          fontSize: 12,
+                          width: 14,
+                        }}
+                      >
+                        {s.status === "in_progress" ? "◐" : s.status === "failed" ? "✕" : "○"}
                       </Text>
-                      {s.lastActivity ? (
-                        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={1}>
-                          {s.lastActivity}
-                        </Text>
-                      ) : null}
+                      <Text style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }}>
+                        {s.title}
+                      </Text>
                     </View>
-                    <Text style={{ color: meta.color, fontSize: 11, fontWeight: "600" }}>{meta.label}</Text>
+                  ))}
+                {plan.completed > 0 ? (
+                  <Pressable onPress={() => setDonePlanOpen((v) => !v)}>
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                      {donePlanOpen ? "▾ 收起已完成步骤" : `▸ 已隐藏 ${plan.completed} 个已完成步骤`}
+                    </Text>
                   </Pressable>
-                );
-              })}
+                ) : null}
+                {donePlanOpen
+                  ? plan.steps
+                      .filter((s) => s.status === "done" || s.status === "skipped")
+                      .map((s, idx) => (
+                        <Text key={`d-${idx}-${s.title}`} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                          ✓ {s.title}
+                        </Text>
+                      ))
+                  : null}
+              </SectionCard>
+            ) : (
+              <DisclosureBar
+                title={`✓ 执行清单已全部完成 (${plan.completed}/${plan.total})`}
+                count="已折叠"
+                accentColor={theme.colors.statusSuccess}
+                open={donePlanOpen}
+                theme={theme}
+                onToggle={() => setDonePlanOpen((v) => !v)}
+              >
+                {plan.steps.map((s, idx) => (
+                  <Text key={`${idx}-${s.title}`} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                    ✓ {s.title}
+                  </Text>
+                ))}
+              </DisclosureBar>
+            )
+          ) : null}
+
+          {/* Running workflows & background tasks only */}
+          {workflows.some((w) => w.status === "running" || w.status === "failed") ? (
+            <SectionCard title="Python Workflow 编排" theme={theme}>
+              {workflows
+                .filter((w) => w.status === "running" || w.status === "failed")
+                .map((wf) => {
+                  const meta = stateMeta(wf.status, theme);
+                  return (
+                    <View key={wf.id} style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
+                      <Text style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }} numberOfLines={1}>
+                        {wf.description}
+                      </Text>
+                      <Text style={{ color: meta.color, fontSize: 11, fontWeight: "600" }}>{meta.label}</Text>
+                    </View>
+                  );
+                })}
             </SectionCard>
           ) : null}
 
@@ -1042,9 +1334,94 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             </SectionCard>
           ) : null}
         </ScrollView>
-      ) : tab === "board" ? (
+      ) : tab === "members" ? (
+        /* TAB 2: MEMBERS (Official hive.js membersView: Search -> Active -> Standing by -> Retired collapsed!) */
         <View style={{ flex: 1 }}>
-          {/* Filter bar */}
+          <View
+            style={{
+              paddingHorizontal: 12,
+              paddingVertical: 8,
+              borderBottomWidth: 1,
+              borderBottomColor: theme.colors.border,
+            }}
+          >
+            <TextInput
+              value={memberSearch}
+              onChangeText={setMemberSearch}
+              placeholder="搜索成员名 / 模型 / 最新动作…"
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={{
+                color: theme.colors.foreground,
+                backgroundColor: theme.colors.surface2,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                borderRadius: 7,
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                fontSize: 12,
+              }}
+            />
+          </View>
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 10 }}>
+            {visibleActiveMembers.length > 0 ? (
+              <SectionCard title="活跃中 (Active)" right={`${visibleActiveMembers.length}`} theme={theme}>
+                {visibleActiveMembers.map((m) => (
+                  <MemberRow
+                    key={m.name + m.conversationId}
+                    member={m}
+                    taskDesc={swarmPlan?.tasks[m.name]}
+                    theme={theme}
+                    onOpen={() => openMemberLog(m)}
+                  />
+                ))}
+              </SectionCard>
+            ) : null}
+
+            {visibleStandbyMembers.length > 0 ? (
+              <SectionCard title="待命中 (Standing by)" right={`${visibleStandbyMembers.length}`} theme={theme}>
+                {visibleStandbyMembers.map((m) => (
+                  <MemberRow
+                    key={m.name + m.conversationId}
+                    member={m}
+                    taskDesc={swarmPlan?.tasks[m.name]}
+                    theme={theme}
+                    onOpen={() => openMemberLog(m)}
+                  />
+                ))}
+              </SectionCard>
+            ) : null}
+
+            {visibleActiveMembers.length === 0 && visibleStandbyMembers.length === 0 ? (
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+                当前没有活跃或待命的 Swarm 成员。
+              </Text>
+            ) : null}
+
+            {/* Official hive.js Retired collapsible drawer (collapsed by default!) */}
+            {visibleRetiredMembers.length > 0 ? (
+              <DisclosureBar
+                title="已归档 / 已结束 (Retired)"
+                count={`${visibleRetiredMembers.length}`}
+                open={retiredMembersOpen || memberSearchQ.length > 0}
+                theme={theme}
+                onToggle={() => setRetiredMembersOpen((v) => !v)}
+              >
+                {visibleRetiredMembers.map((m) => (
+                  <MemberRow
+                    key={m.name + m.conversationId}
+                    member={m}
+                    taskDesc={swarmPlan?.tasks[m.name]}
+                    theme={theme}
+                    onOpen={() => openMemberLog(m)}
+                  />
+                ))}
+              </DisclosureBar>
+            ) : null}
+          </ScrollView>
+        </View>
+      ) : tab === "board" ? (
+        /* TAB 3: BOARD (Official search + poster/@mention filter + safe coordinator composer) */
+        <View style={{ flex: 1 }}>
           <View
             style={{
               paddingHorizontal: 12,
@@ -1054,20 +1431,34 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
               gap: 6,
             }}
           >
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-                共 {filteredPosts.length} / {detail?.boardTotal ?? boardPosts.length} 条帖子
-              </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <TextInput
+                value={boardSearch}
+                onChangeText={setBoardSearch}
+                placeholder="搜索帖子正文或发帖人…"
+                placeholderTextColor={theme.colors.foregroundMuted}
+                style={{
+                  flex: 1,
+                  color: theme.colors.foreground,
+                  backgroundColor: theme.colors.surface2,
+                  borderColor: theme.colors.border,
+                  borderWidth: 1,
+                  borderRadius: 7,
+                  paddingHorizontal: 10,
+                  paddingVertical: 5,
+                  fontSize: 12,
+                }}
+              />
               <Pressable onPress={() => setBoardNewestFirst((v) => !v)}>
                 <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
-                  {boardNewestFirst ? "排序：最新在前 ⇅" : "排序：时间正序 ⇅"}
+                  {boardNewestFirst ? "最新在前 ⇅" : "正序 ⇅"}
                 </Text>
               </Pressable>
             </View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <View style={{ flexDirection: "row", gap: 6 }}>
                 <Chip
-                  label="全部"
+                  label={`全部 (${filteredPosts.length})`}
                   color={theme.colors.foreground}
                   theme={theme}
                   active={boardFilter === "all"}
@@ -1097,7 +1488,6 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             )}
           </ScrollView>
 
-          {/* Safe directive composer via coordinator */}
           <View
             style={{
               borderTopWidth: 1,
@@ -1176,6 +1566,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
           </View>
         </View>
       ) : (
+        /* TAB 4: TEAMWORK & SUBAGENT TREE (Hides completed by default, matching official retired drawer!) */
         <View style={{ flex: 1 }}>
           <View
             style={{
@@ -1186,41 +1577,53 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
               flexDirection: "row",
               justifyContent: "space-between",
               alignItems: "center",
+              gap: 8,
             }}
           >
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-              点击任意节点可查看其实时执行日志
+              活跃 {treePartitions.active.length} · 已完成 {treePartitions.completed.length}
             </Text>
             <Chip
-              label={onlyRunning ? "仅显示运行中 ✓" : "全部节点"}
+              label={
+                showCompletedTree
+                  ? "隐藏已完成"
+                  : `显示已完成 (+${treePartitions.completed.length})`
+              }
               color={theme.colors.foreground}
               theme={theme}
-              active={onlyRunning}
-              onPress={() => setOnlyRunning((v) => !v)}
+              active={showCompletedTree}
+              onPress={() => setShowCompletedTree((v) => !v)}
             />
           </View>
           <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 6 }}>
-            {allTreeNodes.length === 0 ? (
-              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-                {onlyRunning ? "当前没有运行中的子代理节点。" : "暂无子代理节点。"}
-              </Text>
+            {treePartitions.active.length === 0 && !showCompletedTree ? (
+              <View
+                style={{
+                  backgroundColor: theme.colors.surface1,
+                  borderColor: theme.colors.border,
+                  borderWidth: 1,
+                  borderRadius: 9,
+                  padding: 14,
+                  gap: 6,
+                }}
+              >
+                <Text style={{ color: theme.colors.statusSuccess, fontSize: 13, fontWeight: "700" }}>
+                  ✓ 当前没有运行中的节点
+                </Text>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+                  已有 {treePartitions.completed.length} 个已完成节点默认折叠，点击右上角按钮可随时展开复盘。
+                </Text>
+              </View>
             ) : (
-              allTreeNodes.map(({ group, node }) => {
+              (showCompletedTree ? treePartitions.all : treePartitions.active).map(({ group, node }) => {
                 const depth = Math.min(node.depth ?? 0, 4);
                 const meta = stateMeta(node.state, theme);
                 const cat = categoryMeta(node.category, theme);
+                const done = node.state !== "running" && node.state !== "failed";
                 return (
                   <Pressable
                     key={node.id}
-                    onPress={() =>
-                      setSelectedChild({
-                        conversationId: node.id,
-                        label: node.role,
-                        subtitle: `${node.typeName}${node.model ? ` · ${node.model}` : ""}`,
-                        running: node.state === "running",
-                        workspace: node.workspace ?? null,
-                      })
-                    }
+                    onPress={() => openSubagentLog(node)}
                     style={{
                       marginLeft: depth * 14,
                       backgroundColor: theme.colors.surface1,
@@ -1231,6 +1634,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                       borderRadius: 7,
                       padding: 9,
                       gap: 3,
+                      opacity: done ? 0.78 : 1,
                     }}
                   >
                     <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>

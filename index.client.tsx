@@ -45,14 +45,13 @@ function resolvePillPresentation(st: AgentBgStatus | null): { visible: boolean; 
     return { visible: true, label: "/goal 循环中" };
   }
   if (st.swarm) {
-    const seq = st.swarm.latestSeq ? ` · #${st.swarm.latestSeq}` : "";
-    return { visible: true, label: `Swarm 面板 (${st.swarm.members.length})${seq}` };
+    return { visible: true, label: "Swarm ✓" };
   }
   if (st.teamwork) {
-    return { visible: true, label: `Teamwork (${st.teamwork.totalNodes} 节点)` };
+    return { visible: true, label: "Teamwork ✓" };
   }
   if (st.workflows && st.workflows.length > 0) {
-    return { visible: true, label: `Workflow (${st.workflows.length})` };
+    return { visible: true, label: "Workflow ✓" };
   }
   if (st.plan && st.plan.inPlanMode) {
     return { visible: true, label: "Plan 模式" };
