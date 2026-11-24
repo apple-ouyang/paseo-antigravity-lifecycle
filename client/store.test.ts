@@ -4,6 +4,7 @@ import {
   applyChildTranscriptResponse,
   clearAllStatuses,
   consumeConsoleNavRequest,
+  formatLocalTimestamp,
   getChildTranscriptCache,
   getConsoleNavRequest,
   openConsoleForAgent,
@@ -139,4 +140,17 @@ test("applyChildTranscriptResponse caches full loads and merges incremental delt
   } finally {
     clearAllStatuses();
   }
+});
+
+test("formatLocalTimestamp converts UTC ISO strings to local time and preserves local board strings", () => {
+  const sample = "2026-11-24T12:03:51Z";
+  const d = new Date(sample);
+  const pad2 = (n: number) => (n < 10 ? `0${n}` : String(n));
+  const expectedSameDay = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  const expectedOtherDay = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${expectedSameDay}`;
+
+  assert.equal(formatLocalTimestamp(sample, d.getTime() + 60_000), expectedSameDay);
+  assert.equal(formatLocalTimestamp(sample, d.getTime() + 2 * 86_400_000), expectedOtherDay);
+  assert.equal(formatLocalTimestamp("2026-11-24 20:03:33"), "2026-11-24 20:03:33");
+  assert.equal(formatLocalTimestamp(null), null);
 });

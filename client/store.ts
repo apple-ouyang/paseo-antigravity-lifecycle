@@ -200,3 +200,35 @@ export function openConsoleForAgent(
   }
   openPanelCallback(agentId, workspaceId);
 }
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+/**
+ * Converts UTC/offset ISO timestamps (e.g. "2026-11-24T12:03:51Z") into local HH:MM:SS
+ * (or MM-DD HH:MM:SS when not today). Already-local strings without timezone suffix pass through cleanly.
+ */
+export function formatLocalTimestamp(
+  raw: string | null | undefined,
+  nowMs: number = Date.now(),
+): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // ISO-8601 with explicit timezone (Z or ±HH:MM / ±HHMM) -> convert to local clock
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)) {
+    const d = new Date(trimmed);
+    if (Number.isNaN(d.getTime())) return trimmed.slice(11, 19);
+    const now = new Date(nowMs);
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate();
+    const hms = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+    return sameDay ? hms : `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${hms}`;
+  }
+
+  return trimmed;
+}

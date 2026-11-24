@@ -22,6 +22,7 @@ import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
 import {
   applyChildTranscriptResponse,
   consumeConsoleNavRequest,
+  formatLocalTimestamp,
   getChildTranscriptCache,
   getConsoleDetailCache,
   getConsoleNavRequest,
@@ -430,7 +431,9 @@ function BoardPostRow({
           ))}
         </View>
         {post.time ? (
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>{post.time}</Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+            {formatLocalTimestamp(post.time)}
+          </Text>
         ) : null}
       </View>
 
@@ -1098,7 +1101,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                   </Text>
                   {step.createdAt ? (
                     <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
-                      {step.createdAt.slice(11, 19)}
+                      {formatLocalTimestamp(step.createdAt)}
                     </Text>
                   ) : null}
                 </View>

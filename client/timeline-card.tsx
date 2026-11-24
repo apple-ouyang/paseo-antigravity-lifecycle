@@ -4,7 +4,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { agyBoardSliceGet, type SwarmBoardPost } from "../shared/rpc.ts";
 import type { AgyToolCardData } from "../shared/timeline.ts";
-import { openConsoleForAgent } from "./store.ts";
+import { formatLocalTimestamp, openConsoleForAgent } from "./store.ts";
 
 function accentColor(accent: AgyToolCardData["accent"], theme: PluginTheme): string {
   switch (accent) {
@@ -259,7 +259,7 @@ export function AgyToolCard({
                       </Text>
                       {post.time ? (
                         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
-                          {post.time}
+                          {formatLocalTimestamp(post.time)}
                         </Text>
                       ) : null}
                     </View>
