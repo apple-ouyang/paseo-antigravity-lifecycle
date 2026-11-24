@@ -168,6 +168,21 @@ function extractQuestionAnswer(rawOutput: unknown): string | null {
   return cleaned.length > 600 ? `${cleaned.slice(0, 599)}…` : cleaned;
 }
 
+function extractConversationIdFromOutput(rawOutput: unknown): string | null {
+  if (!rawOutput) return null;
+  if (isRecord(rawOutput)) {
+    const direct = readStr(rawOutput, ["conversationId", "conversation_id", "id"]);
+    if (direct && /^[a-f0-9-]{8,}$/i.test(direct)) return direct;
+  }
+  const text = typeof rawOutput === "string" ? rawOutput : safeJsonPreview(rawOutput, 600);
+  if (!text) return null;
+  const m =
+    /conversation[_-]?id["'\s:=]+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i.exec(
+      text,
+    ) ?? /\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b/i.exec(text);
+  return m?.[1] ?? null;
+}
+
 function buildCardData(
   toolKey: string,
   status: AgyToolCardData["status"],
@@ -222,6 +237,7 @@ function buildCardData(
           mentions: name ? [name] : [],
           boardSince: null,
           steps: null,
+          targetMember: name && !countTag ? name : null,
           canOpenConsole: true,
         };
       }
@@ -238,6 +254,7 @@ function buildCardData(
           mentions: name ? [name] : [],
           boardSince: null,
           steps: null,
+          targetMember: name && name !== "coordinator" ? name : null,
           canOpenConsole: true,
         };
       }
@@ -254,6 +271,7 @@ function buildCardData(
           mentions: name ? [name] : [],
           boardSince: null,
           steps: null,
+          targetMember: name && name !== "coordinator" ? name : null,
           canOpenConsole: true,
         };
       }
@@ -345,6 +363,7 @@ function buildCardData(
       const meta = [typeName, workspace && workspace !== "inherit" ? workspace : null, model && model !== "inherit" ? model : null]
         .filter(Boolean)
         .join(" · ");
+      const targetSubagentId = extractConversationIdFromOutput(rawOutput);
       return {
         toolKey,
         category: "subagent_invoke",
@@ -357,6 +376,7 @@ function buildCardData(
         mentions: [],
         boardSince: null,
         steps: null,
+        targetSubagentId,
         canOpenConsole: true,
       };
     }
@@ -395,6 +415,7 @@ function buildCardData(
         mentions: [],
         boardSince: null,
         steps: null,
+        targetSubagentId: recipient,
         canOpenConsole: true,
       };
     }

@@ -48,6 +48,7 @@ test("transformAgyOtherToolCall transforms Swarm tools into validated semantic c
   const parsedAdd = AgyToolCardSchema.parse(add?.items[0].data);
   assert.equal(parsedAdd.badge, "Swarm 派人");
   assert.equal(parsedAdd.headline, "添加 auditor-w2");
+  assert.equal(parsedAdd.targetMember, "auditor-w2");
 
   const readBoard = callTransform("Run read_board", { since: 29 });
   const parsedRead = AgyToolCardSchema.parse(readBoard?.items[0].data);

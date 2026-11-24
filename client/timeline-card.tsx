@@ -6,8 +6,11 @@ import { agyBoardSliceGet, type SwarmBoardPost } from "../shared/rpc.ts";
 import type { AgyQuestionItem, AgyToolCardData } from "../shared/timeline.ts";
 import {
   formatLocalTimestamp,
+  getStatusSnapshot,
   getSubmittedQuestionAnswer,
   openConsoleForAgent,
+  resolveMemberChildFromStatus,
+  resolveSubagentChildFromStatus,
   setSubmittedQuestionAnswer,
 } from "./store.ts";
 
@@ -518,7 +521,60 @@ export function AgyToolCard({
     }
   };
 
-  // Interactive question selector for ask_question
+  const consoleAction = useMemo((): { label: string; onPress: () => void } | null => {
+    if (!data.canOpenConsole) return null;
+
+    if (data.targetMember) {
+      const memberName = data.targetMember;
+      return {
+        label: "看对话",
+        onPress: () => {
+          const resolved = resolveMemberChildFromStatus(getStatusSnapshot(agentId), memberName);
+          if (resolved) {
+            openConsoleForAgent(agentId, undefined, { kind: "child", child: resolved });
+          } else {
+            openConsoleForAgent(agentId, undefined, { kind: "member_by_name", memberName });
+          }
+        },
+      };
+    }
+
+    if (data.category === "subagent_invoke" || data.category === "subagent_message") {
+      return {
+        label: "看对话",
+        onPress: () => {
+          const ref = {
+            id: data.targetSubagentId ?? null,
+            role: data.category === "subagent_invoke" ? data.headline : null,
+          };
+          const resolved = resolveSubagentChildFromStatus(getStatusSnapshot(agentId), ref);
+          if (resolved) {
+            openConsoleForAgent(agentId, undefined, { kind: "child", child: resolved });
+          } else {
+            openConsoleForAgent(agentId, undefined, { kind: "subagent_by_ref", ...ref });
+          }
+        },
+      };
+    }
+
+    if (
+      data.category === "swarm_post" ||
+      data.category === "swarm_read" ||
+      data.category === "swarm_wait"
+    ) {
+      const concreteMentions = data.mentions.filter((m) => m !== "coordinator" && m !== "all");
+      const boardFilter = concreteMentions.length === 1 ? concreteMentions[0] : undefined;
+      return {
+        label: "消息板",
+        onPress: () => openConsoleForAgent(agentId, undefined, { kind: "board", filter: boardFilter }),
+      };
+    }
+
+    return {
+      label: "控制台",
+      onPress: () => openConsoleForAgent(agentId, undefined, { kind: "overview" }),
+    };
+  }, [agentId, data]);
   if (data.category === "question" && data.questions && data.questions.length > 0) {
     return <AgyQuestionCard agentId={agentId} data={data} theme={theme} />;
   }
@@ -632,10 +688,10 @@ export function AgyToolCard({
               </Text>
             </Pressable>
           ) : null}
-          {data.canOpenConsole ? (
-            <Pressable onPress={() => openConsoleForAgent(agentId)}>
+          {consoleAction ? (
+            <Pressable onPress={consoleAction.onPress}>
               <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "500" }}>
-                控制台
+                {consoleAction.label}
               </Text>
             </Pressable>
           ) : null}

@@ -35,9 +35,12 @@ import {
   getConsoleDetailCache,
   getConsoleNavRequest,
   getStatusSnapshot,
+  resolveMemberChildFromStatus,
+  resolveSubagentChildFromStatus,
   setConsoleDetailCache,
   subscribeConsoleNav,
   subscribeStatus,
+  type ConsoleNavTarget,
   type SelectedChildTarget,
 } from "./store.ts";
 
@@ -617,26 +620,85 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
     }
   }, [tab, boardFilter]);
 
+  const [pendingLookup, setPendingLookup] = useState<
+    Extract<ConsoleNavTarget, { kind: "member_by_name" | "subagent_by_ref" }> | null
+  >(null);
+
   useEffect(() => {
     if (!agentId || !navRequest) return;
     consumeConsoleNavRequest(agentId, navRequest.seq);
     const { target } = navRequest;
     if (target.kind === "child") {
+      setPendingLookup(null);
       selectChild(target.child);
+    } else if (target.kind === "member_by_name") {
+      const resolved = resolveMemberChildFromStatus(
+        detail?.status ?? liveStatus,
+        target.memberName,
+      );
+      if (resolved) {
+        setPendingLookup(null);
+        selectChild(resolved);
+      } else {
+        setPendingLookup(target);
+      }
+    } else if (target.kind === "subagent_by_ref") {
+      const resolved = resolveSubagentChildFromStatus(detail?.status ?? liveStatus, target);
+      if (resolved) {
+        setPendingLookup(null);
+        selectChild(resolved);
+      } else {
+        setPendingLookup(target);
+      }
     } else if (target.kind === "board") {
+      setPendingLookup(null);
       setSelectedChild(null);
       setTab("board");
       setTabInitialized(true);
       if (target.filter) {
         setBoardFilter(target.filter);
         setComposeTarget(target.filter);
+      } else {
+        setBoardFilter("all");
       }
     } else if (target.kind === "overview") {
+      setPendingLookup(null);
       setSelectedChild(null);
       setTab("overview");
       setTabInitialized(true);
     }
-  }, [agentId, navRequest, selectChild]);
+  }, [agentId, navRequest, detail, liveStatus, selectChild]);
+
+  useEffect(() => {
+    if (!pendingLookup) return;
+    const currentStatus = detail?.status ?? liveStatus;
+    if (!currentStatus) return;
+    if (pendingLookup.kind === "member_by_name") {
+      const resolved = resolveMemberChildFromStatus(currentStatus, pendingLookup.memberName);
+      if (resolved) {
+        setPendingLookup(null);
+        selectChild(resolved);
+      } else if (!loading) {
+        setPendingLookup(null);
+        setSelectedChild(null);
+        setTab("board");
+        setTabInitialized(true);
+        setBoardFilter(pendingLookup.memberName);
+        setComposeTarget(pendingLookup.memberName);
+      }
+    } else if (pendingLookup.kind === "subagent_by_ref") {
+      const resolved = resolveSubagentChildFromStatus(currentStatus, pendingLookup);
+      if (resolved) {
+        setPendingLookup(null);
+        selectChild(resolved);
+      } else if (!loading) {
+        setPendingLookup(null);
+        setSelectedChild(null);
+        setTab("tree");
+        setTabInitialized(true);
+      }
+    }
+  }, [pendingLookup, detail, liveStatus, loading, selectChild]);
 
   const reloadConsole = useCallback(async () => {
     if (!agentId) return;

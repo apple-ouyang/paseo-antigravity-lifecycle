@@ -29,7 +29,55 @@ export interface ChildTranscriptCacheEntry {
 export type ConsoleNavTarget =
   | { kind: "overview" }
   | { kind: "board"; filter?: string }
-  | { kind: "child"; child: SelectedChildTarget };
+  | { kind: "child"; child: SelectedChildTarget }
+  | { kind: "member_by_name"; memberName: string }
+  | { kind: "subagent_by_ref"; id?: string | null; role?: string | null };
+
+export function resolveMemberChildFromStatus(
+  status: AgentBgStatus | null,
+  memberName: string,
+): SelectedChildTarget | null {
+  if (!status?.swarm?.members) return null;
+  const target = memberName.toLowerCase();
+  const matched = status.swarm.members.find((m) => m.name.toLowerCase() === target);
+  if (!matched || !matched.conversationId) return null;
+  return {
+    conversationId: matched.conversationId,
+    label: `@${matched.name}`,
+    subtitle: matched.model,
+    running: matched.state === "working",
+    workspace: matched.workspace ?? null,
+    memberName: matched.name,
+  };
+}
+
+export function resolveSubagentChildFromStatus(
+  status: AgentBgStatus | null,
+  ref: { id?: string | null; role?: string | null },
+): SelectedChildTarget | null {
+  if (!status) return null;
+  const allNodes = [...(status.teamwork?.nodes ?? []), ...status.subagents];
+  if (allNodes.length === 0) return null;
+  const idLower = ref.id?.trim().toLowerCase() ?? "";
+  const roleLower = ref.role?.trim().toLowerCase() ?? "";
+  const matched =
+    (idLower
+      ? allNodes.find(
+          (n) => n.id.toLowerCase() === idLower || n.id.toLowerCase().startsWith(idLower),
+        )
+      : undefined) ??
+    (roleLower
+      ? [...allNodes].reverse().find((n) => n.role.trim().toLowerCase() === roleLower)
+      : undefined);
+  if (!matched) return null;
+  return {
+    conversationId: matched.id,
+    label: matched.role,
+    subtitle: `${matched.typeName}${matched.model ? ` · ${matched.model}` : ""}`,
+    running: matched.state === "running",
+    workspace: matched.workspace ?? null,
+  };
+}
 
 export interface ConsoleNavRequest {
   seq: number;

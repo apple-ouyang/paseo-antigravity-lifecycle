@@ -9,6 +9,8 @@ import {
   getConsoleNavRequest,
   openConsoleForAgent,
   registerAgentWorkspace,
+  resolveMemberChildFromStatus,
+  resolveSubagentChildFromStatus,
   setOpenConsoleHandler,
   subscribeConsoleNav,
   unregisterAgentWorkspace,
@@ -153,4 +155,59 @@ test("formatLocalTimestamp converts UTC ISO strings to local time and preserves 
   assert.equal(formatLocalTimestamp(sample, d.getTime() + 2 * 86_400_000), expectedOtherDay);
   assert.equal(formatLocalTimestamp("2026-11-24 20:03:33"), "2026-11-24 20:03:33");
   assert.equal(formatLocalTimestamp(null), null);
+});
+
+test("resolveMemberChildFromStatus and resolveSubagentChildFromStatus resolve direct chat jump targets", () => {
+  const status = {
+    agentId: "a1",
+    sessionId: "s1",
+    backgroundActive: true,
+    goalActive: false,
+    coordinatorState: "swarm_wait" as const,
+    pillLabel: "Swarm",
+    summaryLine: "Swarm",
+    swarm: {
+      title: "Demo",
+      working: 1,
+      waiting: 0,
+      completed: 0,
+      members: [
+        {
+          name: "opus",
+          conversationId: "conv-opus",
+          model: "claude-opus-5-5-high",
+          state: "working" as const,
+          updatedAt: null,
+          workspace: "/tmp/wt/opus",
+        },
+      ],
+    },
+    subagents: [
+      {
+        id: "sub-12345678",
+        role: "M1 Challenger",
+        typeName: "teamwork_challenger",
+        state: "running" as const,
+        updatedAt: null,
+        model: "gemini-4-neon-high",
+      },
+    ],
+    tasks: [],
+    observedAt: Date.now(),
+  };
+
+  const memberTarget = resolveMemberChildFromStatus(status, "opus");
+  assert.ok(memberTarget);
+  assert.equal(memberTarget.conversationId, "conv-opus");
+  assert.equal(memberTarget.label, "@opus");
+  assert.equal(memberTarget.memberName, "opus");
+  assert.equal(memberTarget.running, true);
+
+  const subByRole = resolveSubagentChildFromStatus(status, { role: "M1 Challenger" });
+  assert.ok(subByRole);
+  assert.equal(subByRole.conversationId, "sub-12345678");
+  assert.equal(subByRole.label, "M1 Challenger");
+
+  const subById = resolveSubagentChildFromStatus(status, { id: "sub-1234" });
+  assert.equal(subById?.conversationId, "sub-12345678");
 });
