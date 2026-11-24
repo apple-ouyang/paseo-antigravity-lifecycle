@@ -185,9 +185,29 @@ export const TranscriptStepSchema = z.object({
   hasDetail: z.boolean().optional(),
 });
 
+export const ChildStepDiffLineSchema = z.object({
+  kind: z.enum(["ctx", "add", "del", "hunk"]),
+  text: z.string(),
+  oldLine: z.number().int().nullable().optional(),
+  newLine: z.number().int().nullable().optional(),
+});
+
+export const ChildStepDiffSchema = z.object({
+  path: z.string(),
+  mode: z.enum(["edit", "write", "append"]),
+  addedLines: z.number().int(),
+  removedLines: z.number().int(),
+  lines: z.array(ChildStepDiffLineSchema),
+  truncated: z.boolean().optional(),
+  totalLines: z.number().int().optional(),
+});
+
 export const ChildStepToolDetailSchema = z.object({
   name: z.string(),
   summary: z.string(),
+  subtitle: z.string().nullable().optional(),
+  command: z.string().nullable().optional(),
+  diff: ChildStepDiffSchema.nullable().optional(),
   primaryText: z.string().nullable(),
   argsText: z.string().nullable(),
   output: z.string().nullable(),
@@ -332,6 +352,8 @@ export const agyChildStepDetailGet = defineRpc({
 export type ChildTranscriptResponse = NonNullable<
   z.infer<typeof agyChildTranscriptGet.output>
 >;
+export type ChildStepDiffLine = z.infer<typeof ChildStepDiffLineSchema>;
+export type ChildStepDiff = z.infer<typeof ChildStepDiffSchema>;
 export type ChildStepToolDetail = z.infer<typeof ChildStepToolDetailSchema>;
 export type ChildStepDetail = z.infer<typeof ChildStepDetailSchema>;
 

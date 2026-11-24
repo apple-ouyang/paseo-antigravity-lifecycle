@@ -21,6 +21,8 @@ import {
   type AgyConsoleDetail,
   type AgyMode,
   type ChildStepDetail,
+  type ChildStepDiff,
+  type ChildStepToolDetail,
   type SubagentCategory,
   type SubagentItem,
   type SwarmBoardPost,
@@ -486,6 +488,459 @@ function BoardPostRow({
   );
 }
 
+const INITIAL_DIFF_VISIBLE_LINES = 40;
+
+function toolKindMeta(
+  name: string,
+  theme: PluginTheme,
+): { label: string; color: string } {
+  switch (name) {
+    case "edit_file":
+    case "replace_file_content":
+      return { label: "编辑", color: theme.colors.statusWarning };
+    case "write_file":
+    case "write_to_file":
+      return { label: "写入", color: theme.colors.statusSuccess };
+    case "run_command":
+      return { label: "命令", color: theme.colors.accent };
+    case "read_file":
+      return { label: "读取", color: theme.colors.foregroundMuted };
+    case "post_message":
+      return { label: "发帖", color: theme.colors.accent };
+    case "read_board":
+    case "swarm_wait":
+      return { label: "消息板", color: theme.colors.foregroundMuted };
+    case "swarm":
+      return { label: "Swarm", color: theme.colors.accent };
+    case "invoke_subagent":
+    case "send_message":
+      return { label: "子代理", color: theme.colors.accent };
+    case "update_steps":
+      return { label: "进度", color: theme.colors.statusSuccess };
+    default:
+      return { label: name, color: theme.colors.foregroundMuted };
+  }
+}
+
+function DiffViewer({ diff, theme }: { diff: ChildStepDiff; theme: PluginTheme }) {
+  const [showAllLines, setShowAllLines] = useState(false);
+  const canExpand = diff.lines.length > INITIAL_DIFF_VISIBLE_LINES;
+  const visibleLines =
+    showAllLines || !canExpand ? diff.lines : diff.lines.slice(0, INITIAL_DIFF_VISIBLE_LINES);
+  const modeLabel =
+    diff.mode === "edit" ? "Diff" : diff.mode === "append" ? "追加写入" : "新建/覆写";
+
+  return (
+    <View
+      style={{
+        borderColor: theme.colors.border,
+        borderWidth: 1,
+        borderRadius: 6,
+        overflow: "hidden",
+        backgroundColor: theme.colors.surface1,
+      }}
+    >
+      <View
+        style={{
+          flexDirection: "row",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 8,
+          paddingHorizontal: 8,
+          paddingVertical: 5,
+          backgroundColor: theme.colors.surface2,
+          borderBottomWidth: 1,
+          borderBottomColor: theme.colors.border,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
+          <Text
+            style={{
+              color: diff.mode === "edit" ? theme.colors.statusWarning : theme.colors.statusSuccess,
+              fontSize: 10,
+              fontWeight: "700",
+            }}
+          >
+            {modeLabel}
+          </Text>
+          <Text
+            selectable
+            style={{ color: theme.colors.foreground, fontSize: 11, fontFamily: "monospace", flexShrink: 1 }}
+            numberOfLines={1}
+          >
+            {diff.path}
+          </Text>
+        </View>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          {diff.addedLines > 0 ? (
+            <Text style={{ color: theme.colors.statusSuccess, fontSize: 11, fontWeight: "700", fontFamily: "monospace" }}>
+              +{diff.addedLines}
+            </Text>
+          ) : null}
+          {diff.removedLines > 0 ? (
+            <Text style={{ color: theme.colors.statusDanger, fontSize: 11, fontWeight: "700", fontFamily: "monospace" }}>
+              -{diff.removedLines}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+
+      <View style={{ paddingVertical: 3 }}>
+        {visibleLines.map((line, idx) => {
+          if (line.kind === "hunk") {
+            return (
+              <View
+                key={`h-${idx}`}
+                style={{
+                  backgroundColor: "rgba(56, 189, 248, 0.10)",
+                  paddingHorizontal: 8,
+                  paddingVertical: 2,
+                }}
+              >
+                <Text
+                  selectable
+                  style={{
+                    color: theme.colors.accent,
+                    fontSize: 10,
+                    fontFamily: "monospace",
+                    lineHeight: 15,
+                  }}
+                >
+                  {line.text}
+                </Text>
+              </View>
+            );
+          }
+
+          const isAdd = line.kind === "add";
+          const isDel = line.kind === "del";
+          const rowBg = isAdd
+            ? "rgba(34, 197, 94, 0.13)"
+            : isDel
+              ? "rgba(239, 68, 68, 0.14)"
+              : "transparent";
+          const sign = isAdd ? "+" : isDel ? "-" : " ";
+          const signColor = isAdd
+            ? theme.colors.statusSuccess
+            : isDel
+              ? theme.colors.statusDanger
+              : theme.colors.foregroundMuted;
+          const lineNo = isDel ? line.oldLine : (line.newLine ?? line.oldLine);
+
+          return (
+            <View
+              key={`l-${idx}`}
+              style={{
+                flexDirection: "row",
+                alignItems: "flex-start",
+                backgroundColor: rowBg,
+                paddingHorizontal: 6,
+                paddingVertical: 1,
+                gap: 4,
+              }}
+            >
+              <Text
+                style={{
+                  width: 30,
+                  textAlign: "right",
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 10,
+                  fontFamily: "monospace",
+                  lineHeight: 16,
+                  opacity: 0.7,
+                }}
+              >
+                {lineNo != null ? String(lineNo) : ""}
+              </Text>
+              <Text
+                style={{
+                  width: 12,
+                  textAlign: "center",
+                  color: signColor,
+                  fontSize: 11,
+                  fontWeight: isAdd || isDel ? "700" : "400",
+                  fontFamily: "monospace",
+                  lineHeight: 16,
+                }}
+              >
+                {sign}
+              </Text>
+              <Text
+                selectable
+                style={{
+                  flex: 1,
+                  color: isAdd || isDel ? theme.colors.foreground : theme.colors.foregroundMuted,
+                  fontSize: 11,
+                  fontFamily: "monospace",
+                  lineHeight: 16,
+                }}
+              >
+                {line.text.length > 0 ? line.text : " "}
+              </Text>
+            </View>
+          );
+        })}
+      </View>
+
+      {canExpand || diff.truncated ? (
+        <View
+          style={{
+            flexDirection: "row",
+            justifyContent: "space-between",
+            alignItems: "center",
+            paddingHorizontal: 8,
+            paddingVertical: 5,
+            borderTopWidth: 1,
+            borderTopColor: theme.colors.border,
+            backgroundColor: theme.colors.surface2,
+          }}
+        >
+          {canExpand ? (
+            <Pressable onPress={() => setShowAllLines((v) => !v)}>
+              <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
+                {showAllLines
+                  ? `▴ 收起至前 ${INITIAL_DIFF_VISIBLE_LINES} 行`
+                  : `▾ 展开剩余 ${diff.lines.length - INITIAL_DIFF_VISIBLE_LINES} 行`}
+              </Text>
+            </Pressable>
+          ) : (
+            <View />
+          )}
+          {diff.truncated && diff.totalLines ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+              已预览 {diff.lines.length} / 共 {diff.totalLines} 行
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function ToolCallItemRow({
+  tc,
+  open,
+  onToggle,
+  theme,
+}: {
+  tc: ChildStepToolDetail;
+  open: boolean;
+  onToggle: () => void;
+  theme: PluginTheme;
+}) {
+  const isErrorOut = tc.outputStatus === "ERROR";
+  const outputLines = tc.output ? tc.output.split("\n").length : 0;
+  const isShortOut = Boolean(tc.output && tc.output.length <= 240 && outputLines <= 6);
+  const [outOpen, setOutOpen] = useState(() => isShortOut || isErrorOut);
+  const meta = toolKindMeta(tc.name, theme);
+  const hasDetailBody = Boolean(tc.diff || tc.command || tc.primaryText || tc.argsText || tc.output);
+
+  return (
+    <View
+      style={{
+        backgroundColor: theme.colors.surface0,
+        borderColor: open ? theme.colors.accent : theme.colors.border,
+        borderWidth: 1,
+        borderRadius: 7,
+        overflow: "hidden",
+      }}
+    >
+      <Pressable
+        onPress={hasDetailBody ? onToggle : undefined}
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          paddingHorizontal: 9,
+          paddingVertical: 7,
+          backgroundColor: open ? theme.colors.surface1 : theme.colors.surface0,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
+          <View
+            style={{
+              backgroundColor: theme.colors.surface2,
+              borderColor: theme.colors.border,
+              borderWidth: 1,
+              borderRadius: 4,
+              paddingHorizontal: 5,
+              paddingVertical: 1,
+            }}
+          >
+            <Text style={{ color: meta.color, fontSize: 10, fontWeight: "700" }}>{meta.label}</Text>
+          </View>
+          <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+            <Text
+              style={{ color: theme.colors.foreground, fontSize: 11, fontWeight: "600" }}
+              numberOfLines={1}
+            >
+              {tc.summary}
+            </Text>
+            {tc.subtitle && tc.subtitle !== tc.summary ? (
+              <Text
+                style={{
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 10,
+                  fontFamily: tc.command || tc.diff ? "monospace" : undefined,
+                }}
+                numberOfLines={1}
+              >
+                {tc.command ? `$ ${tc.subtitle}` : tc.subtitle}
+              </Text>
+            ) : null}
+          </View>
+        </View>
+
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          {tc.diff ? (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+              {tc.diff.addedLines > 0 ? (
+                <Text
+                  style={{
+                    color: theme.colors.statusSuccess,
+                    fontSize: 10,
+                    fontWeight: "700",
+                    fontFamily: "monospace",
+                  }}
+                >
+                  +{tc.diff.addedLines}
+                </Text>
+              ) : null}
+              {tc.diff.removedLines > 0 ? (
+                <Text
+                  style={{
+                    color: theme.colors.statusDanger,
+                    fontSize: 10,
+                    fontWeight: "700",
+                    fontFamily: "monospace",
+                  }}
+                >
+                  -{tc.diff.removedLines}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+          {tc.outputStatus ? (
+            <Text
+              style={{
+                color: isErrorOut ? theme.colors.statusDanger : theme.colors.statusSuccess,
+                fontSize: 10,
+                fontWeight: "600",
+              }}
+            >
+              {tc.outputStatus}
+            </Text>
+          ) : null}
+          {hasDetailBody ? (
+            <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
+              {open ? "▾" : "▸"}
+            </Text>
+          ) : null}
+        </View>
+      </Pressable>
+
+      {open && hasDetailBody ? (
+        <View
+          style={{
+            borderTopWidth: 1,
+            borderTopColor: theme.colors.border,
+            padding: 8,
+            gap: 7,
+          }}
+        >
+          {tc.diff ? <DiffViewer diff={tc.diff} theme={theme} /> : null}
+
+          {tc.command ? (
+            <View
+              style={{
+                backgroundColor: theme.colors.surface1,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                borderRadius: 5,
+                paddingHorizontal: 8,
+                paddingVertical: 6,
+              }}
+            >
+              <Text
+                selectable
+                style={{
+                  color: theme.colors.foreground,
+                  fontSize: 11,
+                  lineHeight: 16,
+                  fontFamily: "monospace",
+                }}
+              >
+                $ {tc.command}
+              </Text>
+            </View>
+          ) : null}
+
+          {tc.primaryText ? (
+            <Text
+              selectable
+              style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}
+            >
+              {tc.primaryText}
+            </Text>
+          ) : null}
+
+          {tc.argsText ? (
+            <Text
+              selectable
+              style={{
+                color: theme.colors.foregroundMuted,
+                fontSize: 11,
+                lineHeight: 16,
+                fontFamily: "monospace",
+                backgroundColor: theme.colors.surface1,
+                borderRadius: 5,
+                padding: 7,
+              }}
+            >
+              {tc.argsText}
+            </Text>
+          ) : null}
+
+          {tc.output ? (
+            <View style={{ gap: 4 }}>
+              <Pressable onPress={() => setOutOpen((v) => !v)}>
+                <Text
+                  style={{
+                    color: isErrorOut ? theme.colors.statusDanger : theme.colors.foregroundMuted,
+                    fontSize: 11,
+                    fontWeight: "600",
+                  }}
+                >
+                  {outOpen
+                    ? `▾ 收起执行结果 (${outputLines > 1 ? `${outputLines} 行 · ` : ""}${tc.output.length} 字)`
+                    : `▸ 展开执行结果 (${outputLines > 1 ? `${outputLines} 行 · ` : ""}${tc.output.length} 字)`}
+                </Text>
+              </Pressable>
+              {outOpen ? (
+                <Text
+                  selectable
+                  style={{
+                    color: isErrorOut ? theme.colors.statusDanger : theme.colors.foreground,
+                    fontSize: 11,
+                    lineHeight: 16,
+                    fontFamily: "monospace",
+                    backgroundColor: theme.colors.surface1,
+                    borderRadius: 5,
+                    padding: 7,
+                  }}
+                >
+                  {tc.output}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function ChildStepRow({
   agentId,
   conversationId,
@@ -510,7 +965,7 @@ function ChildStepRow({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [thinkingOpen, setThinkingOpen] = useState(false);
-  const [openOutputs, setOpenOutputs] = useState<Record<number, boolean>>({});
+  const [openTools, setOpenTools] = useState<Record<number, boolean>>({});
 
   const toggleExpand = () => {
     const next = !expanded;
@@ -545,6 +1000,12 @@ function ChildStepRow({
         setLoading(false);
       });
   };
+
+  const toolCalls = detail?.toolCalls ?? [];
+  const defaultToolOpen = toolCalls.length === 1;
+  const allToolsOpen =
+    toolCalls.length > 0 &&
+    toolCalls.every((_, idx) => openTools[idx] ?? defaultToolOpen);
 
   return (
     <View
@@ -620,99 +1081,51 @@ function ChildStepRow({
                 </Text>
               ) : null}
 
-              {detail.toolCalls.map((tc, tIdx) => {
-                const isLongOut = (tc.output?.length ?? 0) > 600;
-                const outOpen = openOutputs[tIdx] ?? !isLongOut;
-                return (
-                  <View
-                    key={`${tIdx}-${tc.name}`}
-                    style={{
-                      backgroundColor: theme.colors.surface0,
-                      borderColor: theme.colors.border,
-                      borderWidth: 1,
-                      borderRadius: 7,
-                      padding: 9,
-                      gap: 6,
-                    }}
-                  >
-                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                      <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "700", flexShrink: 1 }} numberOfLines={1}>
-                        {tc.name} · {tc.summary}
+              {toolCalls.length > 0 ? (
+                <View style={{ gap: 5 }}>
+                  {toolCalls.length > 1 ? (
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        paddingHorizontal: 2,
+                      }}
+                    >
+                      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600" }}>
+                        共 {toolCalls.length} 个操作（点击单项查看详情 / Diff）
                       </Text>
-                      {tc.outputStatus ? (
-                        <Text
-                          style={{
-                            color:
-                              tc.outputStatus === "ERROR"
-                                ? theme.colors.statusDanger
-                                : theme.colors.statusSuccess,
-                            fontSize: 10,
-                            fontWeight: "600",
-                          }}
-                        >
-                          {tc.outputStatus}
-                        </Text>
-                      ) : null}
-                    </View>
-
-                    {tc.primaryText ? (
-                      <Text
-                        selectable
-                        style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 19 }}
-                      >
-                        {tc.primaryText}
-                      </Text>
-                    ) : null}
-
-                    {tc.argsText ? (
-                      <Text
-                        selectable
-                        style={{
-                          color: theme.colors.foregroundMuted,
-                          fontSize: 11,
-                          lineHeight: 16,
-                          backgroundColor: theme.colors.surface1,
-                          borderRadius: 5,
-                          padding: 7,
+                      <Pressable
+                        onPress={() => {
+                          const nextVal = !allToolsOpen;
+                          const map: Record<number, boolean> = {};
+                          for (let i = 0; i < toolCalls.length; i += 1) map[i] = nextVal;
+                          setOpenTools(map);
                         }}
                       >
-                        {tc.argsText}
-                      </Text>
-                    ) : null}
+                        <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
+                          {allToolsOpen ? "全部收起" : "全部展开"}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
 
-                    {tc.output ? (
-                      <View style={{ gap: 4 }}>
-                        <Pressable
-                          onPress={() =>
-                            setOpenOutputs((prev) => ({ ...prev, [tIdx]: !outOpen }))
-                          }
-                        >
-                          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600" }}>
-                            {outOpen
-                              ? `▾ 收起执行结果 (${tc.output.length} 字)`
-                              : `▸ 展开执行结果 (${tc.output.length} 字)`}
-                          </Text>
-                        </Pressable>
-                        {outOpen ? (
-                          <Text
-                            selectable
-                            style={{
-                              color: theme.colors.foreground,
-                              fontSize: 11,
-                              lineHeight: 17,
-                              backgroundColor: theme.colors.surface1,
-                              borderRadius: 5,
-                              padding: 7,
-                            }}
-                          >
-                            {tc.output}
-                          </Text>
-                        ) : null}
-                      </View>
-                    ) : null}
-                  </View>
-                );
-              })}
+                  {toolCalls.map((tc, tIdx) => {
+                    const isOpen = openTools[tIdx] ?? defaultToolOpen;
+                    return (
+                      <ToolCallItemRow
+                        key={`${tIdx}-${tc.name}`}
+                        tc={tc}
+                        open={isOpen}
+                        onToggle={() =>
+                          setOpenTools((prev) => ({ ...prev, [tIdx]: !isOpen }))
+                        }
+                        theme={theme}
+                      />
+                    );
+                  })}
+                </View>
+              ) : null}
 
               {detail.thinking ? (
                 <View
@@ -743,7 +1156,7 @@ function ChildStepRow({
                 </View>
               ) : null}
 
-              {!detail.content && detail.toolCalls.length === 0 && !detail.thinking ? (
+              {!detail.content && toolCalls.length === 0 && !detail.thinking ? (
                 <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
                   {step.summary || "该步骤无额外详情"}
                 </Text>
@@ -1400,7 +1813,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
             {[
               selectedChild.subtitle,
-              childModel && childModel !== selectedChild.subtitle ? childModel : null,
+              childModel && !selectedChild.subtitle?.includes(childModel) ? childModel : null,
               childTotal > 0 ? `共 ${childTotal} 步（显示最近 ${childSteps.length} 步）` : null,
               selectedChild.workspace ? shortWorkspace(selectedChild.workspace) : null,
             ]

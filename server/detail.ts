@@ -4,6 +4,8 @@ import path from "node:path";
 import type {
   AgyConsoleDetail,
   ChildStepDetail,
+  ChildStepDiff,
+  ChildStepDiffLine,
   ChildStepToolDetail,
   ChildTranscriptResponse,
   SwarmBoardPost,
@@ -502,6 +504,11 @@ export function readChildTranscript(
 
 const MAX_DETAIL_FIELD_CHARS = 24_000;
 const MAX_TOOL_OUTPUT_CHARS = 16_000;
+const MAX_DIFF_LINES = 260;
+const MAX_WRITE_PREVIEW_LINES = 200;
+const MAX_DIFF_LINE_CHARS = 1_600;
+const MAX_LCS_CELLS = 250_000;
+const DIFF_CONTEXT_LINES = 3;
 
 function capDetailText(raw: string | null | undefined, maxChars: number): { text: string | null; truncated: boolean } {
   if (!raw) return { text: null, truncated: false };
@@ -509,6 +516,210 @@ function capDetailText(raw: string | null | undefined, maxChars: number): { text
   if (!trimmed) return { text: null, truncated: false };
   if (trimmed.length <= maxChars) return { text: trimmed, truncated: false };
   return { text: `${trimmed.slice(0, maxChars)}\n…(已截断，原文共 ${trimmed.length} 字)`, truncated: true };
+}
+
+function capDiffLineText(line: string): string {
+  return line.length > MAX_DIFF_LINE_CHARS ? `${line.slice(0, MAX_DIFF_LINE_CHARS - 1)}…` : line;
+}
+
+function shortPathLabel(filePath: string): string {
+  const parts = filePath.split("/").filter(Boolean);
+  return parts.length >= 2 ? `…/${parts.slice(-2).join("/")}` : parts[0] ?? filePath;
+}
+
+function splitContentLines(text: string): string[] {
+  if (!text) return [];
+  const normalized = text.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines;
+}
+
+function buildEditDiff(filePath: string, oldText: string, newText: string): ChildStepDiff {
+  const oldLines = splitContentLines(oldText);
+  const newLines = splitContentLines(newText);
+
+  type RawOp = { kind: "ctx" | "add" | "del"; text: string; oldLine: number | null; newLine: number | null };
+  const ops: RawOp[] = [];
+
+  // Trim identical prefix & suffix first to speed up LCS and minimize hunks.
+  let prefix = 0;
+  const minLen = Math.min(oldLines.length, newLines.length);
+  while (prefix < minLen && oldLines[prefix] === newLines[prefix]) {
+    prefix += 1;
+  }
+  let suffix = 0;
+  while (
+    suffix < oldLines.length - prefix &&
+    suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  for (let i = 0; i < prefix; i += 1) {
+    ops.push({ kind: "ctx", text: oldLines[i], oldLine: i + 1, newLine: i + 1 });
+  }
+
+  const midOld = oldLines.slice(prefix, oldLines.length - suffix);
+  const midNew = newLines.slice(prefix, newLines.length - suffix);
+
+  if (midOld.length === 0 && midNew.length === 0) {
+    // No line differences
+  } else if (midOld.length === 0) {
+    for (let j = 0; j < midNew.length; j += 1) {
+      ops.push({ kind: "add", text: midNew[j], oldLine: null, newLine: prefix + j + 1 });
+    }
+  } else if (midNew.length === 0) {
+    for (let i = 0; i < midOld.length; i += 1) {
+      ops.push({ kind: "del", text: midOld[i], oldLine: prefix + i + 1, newLine: null });
+    }
+  } else if (midOld.length * midNew.length <= MAX_LCS_CELLS) {
+    const m = midOld.length;
+    const n = midNew.length;
+    const dp = new Uint32Array((m + 1) * (n + 1));
+    const cols = n + 1;
+    for (let i = m - 1; i >= 0; i -= 1) {
+      for (let j = n - 1; j >= 0; j -= 1) {
+        if (midOld[i] === midNew[j]) {
+          dp[i * cols + j] = dp[(i + 1) * cols + (j + 1)] + 1;
+        } else {
+          const down = dp[(i + 1) * cols + j];
+          const right = dp[i * cols + (j + 1)];
+          dp[i * cols + j] = down >= right ? down : right;
+        }
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < m && j < n) {
+      if (midOld[i] === midNew[j]) {
+        ops.push({ kind: "ctx", text: midOld[i], oldLine: prefix + i + 1, newLine: prefix + j + 1 });
+        i += 1;
+        j += 1;
+      } else if (dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)]) {
+        ops.push({ kind: "del", text: midOld[i], oldLine: prefix + i + 1, newLine: null });
+        i += 1;
+      } else {
+        ops.push({ kind: "add", text: midNew[j], oldLine: null, newLine: prefix + j + 1 });
+        j += 1;
+      }
+    }
+    while (i < m) {
+      ops.push({ kind: "del", text: midOld[i], oldLine: prefix + i + 1, newLine: null });
+      i += 1;
+    }
+    while (j < n) {
+      ops.push({ kind: "add", text: midNew[j], oldLine: null, newLine: prefix + j + 1 });
+      j += 1;
+    }
+  } else {
+    for (let i = 0; i < midOld.length; i += 1) {
+      ops.push({ kind: "del", text: midOld[i], oldLine: prefix + i + 1, newLine: null });
+    }
+    for (let j = 0; j < midNew.length; j += 1) {
+      ops.push({ kind: "add", text: midNew[j], oldLine: null, newLine: prefix + j + 1 });
+    }
+  }
+
+  for (let s = 0; s < suffix; s += 1) {
+    const oi = oldLines.length - suffix + s;
+    const ni = newLines.length - suffix + s;
+    ops.push({ kind: "ctx", text: oldLines[oi], oldLine: oi + 1, newLine: ni + 1 });
+  }
+
+  let addedLines = 0;
+  let removedLines = 0;
+  const changedIndices: number[] = [];
+  for (let idx = 0; idx < ops.length; idx += 1) {
+    if (ops[idx].kind === "add") {
+      addedLines += 1;
+      changedIndices.push(idx);
+    } else if (ops[idx].kind === "del") {
+      removedLines += 1;
+      changedIndices.push(idx);
+    }
+  }
+
+  const lines: ChildStepDiffLine[] = [];
+  if (changedIndices.length === 0) {
+    for (const op of ops.slice(0, Math.min(ops.length, 20))) {
+      lines.push({ kind: "ctx", text: capDiffLineText(op.text), oldLine: op.oldLine, newLine: op.newLine });
+    }
+  } else {
+    // Group changed indices into unified diff hunks with DIFF_CONTEXT_LINES context
+    const ranges: Array<{ start: number; end: number }> = [];
+    for (const ci of changedIndices) {
+      const s = Math.max(0, ci - DIFF_CONTEXT_LINES);
+      const e = Math.min(ops.length - 1, ci + DIFF_CONTEXT_LINES);
+      const last = ranges[ranges.length - 1];
+      if (last && s <= last.end + 1) {
+        last.end = Math.max(last.end, e);
+      } else {
+        ranges.push({ start: s, end: e });
+      }
+    }
+
+    for (const range of ranges) {
+      const slice = ops.slice(range.start, range.end + 1);
+      const firstOld = slice.find((o) => o.oldLine !== null)?.oldLine ?? 1;
+      const firstNew = slice.find((o) => o.newLine !== null)?.newLine ?? 1;
+      const oldCount = slice.filter((o) => o.kind !== "add").length;
+      const newCount = slice.filter((o) => o.kind !== "del").length;
+      if (ranges.length > 1 || range.start > 0 || range.end < ops.length - 1) {
+        lines.push({
+          kind: "hunk",
+          text: `@@ -${firstOld},${oldCount} +${firstNew},${newCount} @@`,
+          oldLine: null,
+          newLine: null,
+        });
+      }
+      for (const op of slice) {
+        lines.push({
+          kind: op.kind,
+          text: capDiffLineText(op.text),
+          oldLine: op.oldLine,
+          newLine: op.newLine,
+        });
+      }
+    }
+  }
+
+  const totalLines = lines.length;
+  const truncated = totalLines > MAX_DIFF_LINES;
+  return {
+    path: filePath,
+    mode: "edit",
+    addedLines,
+    removedLines,
+    lines: truncated ? lines.slice(0, MAX_DIFF_LINES) : lines,
+    truncated,
+    totalLines,
+  };
+}
+
+function buildWriteDiff(filePath: string, content: string, isAppend: boolean): ChildStepDiff {
+  const rawLines = splitContentLines(content);
+  const totalLines = rawLines.length;
+  const truncated = totalLines > MAX_WRITE_PREVIEW_LINES;
+  const bounded = truncated ? rawLines.slice(0, MAX_WRITE_PREVIEW_LINES) : rawLines;
+  const lines: ChildStepDiffLine[] = bounded.map((text, idx) => ({
+    kind: "add",
+    text: capDiffLineText(text),
+    oldLine: null,
+    newLine: idx + 1,
+  }));
+  return {
+    path: filePath,
+    mode: isAppend ? "append" : "write",
+    addedLines: totalLines,
+    removedLines: 0,
+    lines,
+    truncated,
+    totalLines,
+  };
 }
 
 function cleanGenericToolOutput(raw: string | undefined): string | null {
@@ -522,10 +733,42 @@ function cleanGenericToolOutput(raw: string | undefined): string | null {
   return rest || raw.trim() || null;
 }
 
-function extractToolPrimaryAndArgs(tc: {
+function formatUpdateStepsText(stepsRaw: unknown): string | null {
+  let arr: unknown[] | null = null;
+  if (Array.isArray(stepsRaw)) arr = stepsRaw;
+  else if (typeof stepsRaw === "string") {
+    try {
+      const parsed = JSON.parse(stepsRaw) as unknown;
+      if (Array.isArray(parsed)) arr = parsed;
+    } catch {
+      return null;
+    }
+  }
+  if (!arr || arr.length === 0) return null;
+  const lines: string[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as { title?: unknown; status?: unknown };
+    const title = typeof obj.title === "string" ? obj.title.trim() : "";
+    if (!title) continue;
+    const st = typeof obj.status === "string" ? obj.status : "pending";
+    const icon = st === "done" || st === "skipped" ? "✓" : st === "in_progress" ? "◐" : st === "failed" ? "✕" : "○";
+    lines.push(`${icon} ${title}`);
+  }
+  return lines.length > 0 ? lines.join("\n") : null;
+}
+
+function extractToolStructuredDetail(tc: {
   name?: string;
   args?: Record<string, unknown>;
-}): { primaryText: string | null; argsText: string | null; truncated: boolean } {
+}): {
+  subtitle: string | null;
+  command: string | null;
+  diff: ChildStepDiff | null;
+  primaryText: string | null;
+  argsText: string | null;
+  truncated: boolean;
+} {
   const name = tc.name ?? "tool";
   const rawArgs = tc.args ?? {};
   const cleaned: Record<string, unknown> = {};
@@ -533,36 +776,122 @@ function extractToolPrimaryAndArgs(tc: {
     cleaned[k] = cleanArg(v);
   }
 
+  let subtitle: string | null = null;
+  let command: string | null = null;
+  let diff: ChildStepDiff | null = null;
   let primaryRaw: string | null = null;
   const omittedKeys = new Set<string>();
 
-  if (name === "post_message" && typeof cleaned.text === "string") {
-    primaryRaw = cleaned.text;
-    omittedKeys.add("text");
-  } else if (name === "run_command" && typeof cleaned.CommandLine === "string") {
-    primaryRaw = cleaned.CommandLine;
-    omittedKeys.add("CommandLine");
-  } else if (name === "send_message" && typeof cleaned.Message === "string") {
-    primaryRaw = cleaned.Message;
-    omittedKeys.add("Message");
-  } else if (name === "swarm" && typeof cleaned.brief === "string") {
-    primaryRaw = cleaned.brief;
-    omittedKeys.add("brief");
-  } else if (name === "invoke_subagent" && typeof cleaned.Prompt === "string") {
-    primaryRaw = cleaned.Prompt;
-    omittedKeys.add("Prompt");
+  if (name === "edit_file" || name === "replace_file_content") {
+    const filePath = String(cleaned.Path ?? cleaned.TargetFile ?? "");
+    const targetText =
+      typeof cleaned.Target === "string"
+        ? cleaned.Target
+        : typeof cleaned.TargetContent === "string"
+          ? cleaned.TargetContent
+          : null;
+    const replText =
+      typeof cleaned.Replacement === "string"
+        ? cleaned.Replacement
+        : typeof cleaned.ReplacementContent === "string"
+          ? cleaned.ReplacementContent
+          : null;
+    if (filePath) {
+      subtitle = shortPathLabel(filePath);
+      omittedKeys.add("Path");
+      omittedKeys.add("TargetFile");
+    }
+    if (targetText !== null && replText !== null) {
+      diff = buildEditDiff(filePath || "(file)", targetText, replText);
+      omittedKeys.add("Target");
+      omittedKeys.add("Replacement");
+      omittedKeys.add("TargetContent");
+      omittedKeys.add("ReplacementContent");
+      omittedKeys.add("AllowMultiple");
+      omittedKeys.add("StartLine");
+      omittedKeys.add("EndLine");
+      omittedKeys.add("Instruction");
+    } else if (filePath) {
+      primaryRaw = filePath;
+    }
+  } else if (name === "write_file" || name === "write_to_file") {
+    const filePath = String(cleaned.Path ?? cleaned.TargetFile ?? "");
+    const contentText =
+      typeof cleaned.Content === "string"
+        ? cleaned.Content
+        : typeof cleaned.CodeContent === "string"
+          ? cleaned.CodeContent
+          : null;
+    const isAppend = cleaned.Append === true;
+    if (filePath) {
+      subtitle = shortPathLabel(filePath);
+      omittedKeys.add("Path");
+      omittedKeys.add("TargetFile");
+    }
+    if (contentText !== null) {
+      diff = buildWriteDiff(filePath || "(file)", contentText, isAppend);
+      omittedKeys.add("Content");
+      omittedKeys.add("CodeContent");
+      omittedKeys.add("Overwrite");
+      omittedKeys.add("Append");
+      omittedKeys.add("EmptyFile");
+    } else if (filePath) {
+      primaryRaw = filePath;
+    }
+  } else if (name === "run_command") {
+    if (typeof cleaned.CommandLine === "string") {
+      command = cleaned.CommandLine.trim();
+      subtitle = clipText(command, 90);
+      omittedKeys.add("CommandLine");
+      omittedKeys.add("WaitMsBeforeAsync");
+      omittedKeys.add("NotificationTimeoutSeconds");
+      omittedKeys.add("toolSummary");
+      if (!cleaned.IsDaemon) omittedKeys.add("IsDaemon");
+    }
   } else if (name === "read_file" && typeof cleaned.Path === "string") {
     const range =
       cleaned.StartLine !== undefined || cleaned.EndLine !== undefined
         ? ` (L${cleaned.StartLine ?? 1}–L${cleaned.EndLine ?? "end"})`
         : "";
+    subtitle = `${shortPathLabel(cleaned.Path)}${range}`;
     primaryRaw = `${cleaned.Path}${range}`;
     omittedKeys.add("Path");
     omittedKeys.add("StartLine");
     omittedKeys.add("EndLine");
-  } else if ((name === "edit_file" || name === "write_file") && typeof cleaned.Path === "string") {
-    primaryRaw = String(cleaned.Path);
-    omittedKeys.add("Path");
+    omittedKeys.add("ByteOffset");
+  } else if (name === "post_message" && typeof cleaned.text === "string") {
+    primaryRaw = cleaned.text;
+    subtitle = clipText(cleaned.text, 80);
+    omittedKeys.add("text");
+  } else if (name === "send_message" && typeof cleaned.Message === "string") {
+    primaryRaw = cleaned.Message;
+    subtitle = typeof cleaned.Recipient === "string" ? `→ ${cleaned.Recipient}` : clipText(cleaned.Message, 80);
+    omittedKeys.add("Message");
+  } else if (name === "swarm") {
+    const act = typeof cleaned.action === "string" ? cleaned.action : "";
+    const memberName = typeof cleaned.name === "string" ? `@${cleaned.name}` : "";
+    const model = typeof cleaned.model === "string" ? cleaned.model : "";
+    subtitle = [act, memberName, model].filter(Boolean).join(" · ") || null;
+    if (typeof cleaned.brief === "string") {
+      primaryRaw = cleaned.brief;
+      omittedKeys.add("brief");
+    }
+  } else if (name === "invoke_subagent" && typeof cleaned.Prompt === "string") {
+    primaryRaw = cleaned.Prompt;
+    const role = typeof cleaned.Role === "string" ? cleaned.Role : "";
+    const typeName = typeof cleaned.TypeName === "string" ? cleaned.TypeName : "";
+    subtitle = [role, typeName].filter(Boolean).join(" · ") || null;
+    omittedKeys.add("Prompt");
+  } else if (name === "update_steps" && cleaned.steps !== undefined) {
+    const formatted = formatUpdateStepsText(cleaned.steps);
+    if (formatted) {
+      primaryRaw = formatted;
+      omittedKeys.add("steps");
+    }
+  } else if (name === "swarm_wait" || name === "read_board") {
+    if (cleaned.since !== undefined) {
+      subtitle = `> #${String(cleaned.since)}`;
+    }
   }
 
   const remaining: Record<string, unknown> = {};
@@ -572,6 +901,7 @@ function extractToolPrimaryAndArgs(tc: {
   }
 
   const cappedPrimary = capDetailText(primaryRaw, MAX_DETAIL_FIELD_CHARS);
+  const cappedCommand = command ? capDetailText(command, 8_000) : { text: null, truncated: false };
   let argsRaw: string | null = null;
   if (Object.keys(remaining).length > 0) {
     try {
@@ -580,11 +910,18 @@ function extractToolPrimaryAndArgs(tc: {
       argsRaw = null;
     }
   }
-  const cappedArgs = capDetailText(argsRaw, 6_000);
+  const cappedArgs = capDetailText(argsRaw, 4_000);
   return {
+    subtitle,
+    command: cappedCommand.text,
+    diff,
     primaryText: cappedPrimary.text,
     argsText: cappedArgs.text,
-    truncated: cappedPrimary.truncated || cappedArgs.truncated,
+    truncated:
+      cappedPrimary.truncated ||
+      cappedCommand.truncated ||
+      cappedArgs.truncated ||
+      Boolean(diff?.truncated),
   };
 }
 
@@ -644,13 +981,17 @@ export function readChildStepDetail(
     for (let k = 0; k < row.tool_calls.length; k += 1) {
       const tc = row.tool_calls[k];
       const paired = followingGenerics[k];
-      const { primaryText, argsText, truncated: tTrunc } = extractToolPrimaryAndArgs(tc);
+      const { subtitle, command, diff, primaryText, argsText, truncated: tTrunc } =
+        extractToolStructuredDetail(tc);
       const outClean = cleanGenericToolOutput(paired?.content);
       const cappedOut = capDetailText(outClean, MAX_TOOL_OUTPUT_CHARS);
       truncated = truncated || tTrunc || cappedOut.truncated;
       toolCalls.push({
         name: tc.name ?? "tool",
         summary: summarizeToolCall(tc),
+        subtitle,
+        command,
+        diff,
         primaryText,
         argsText,
         output: cappedOut.text,

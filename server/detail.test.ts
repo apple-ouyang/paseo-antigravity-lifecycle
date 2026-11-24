@@ -673,3 +673,84 @@ test("readChildStepDetail loads full untruncated content, thinking, post_message
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
+
+test("readChildStepDetail renders structured edit_file LCS diff, write_file lines, and run_command without raw JSON blobs", () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-stepdiff-"));
+  try {
+    const brain = path.join(homeDir, ".gemini", "antigravity-cli", "brain");
+    const logs = path.join(brain, "worker-diff", ".system_generated", "logs");
+    const iso = new Date().toISOString();
+
+    writeJsonl(path.join(logs, "transcript_full.jsonl"), [
+      {
+        step_index: 41,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: iso,
+        model: "gemini-4-neon-high",
+        tool_calls: [
+          {
+            name: "edit_file",
+            args: {
+              Path: JSON.stringify("/Users/admin/workspace/research/main.tex"),
+              Target: JSON.stringify("line 1\nold line 2\nline 3\n"),
+              Replacement: JSON.stringify("line 1\nnew line 2a\nnew line 2b\nline 3\n"),
+            },
+          },
+          {
+            name: "write_file",
+            args: {
+              Path: JSON.stringify("/Users/admin/workspace/research/papers/p1/main.tex"),
+              Content: JSON.stringify("\\documentclass{article}\n\\begin{document}\nHello\n\\end{document}\n"),
+              Overwrite: true,
+            },
+          },
+          {
+            name: "run_command",
+            args: {
+              CommandLine: JSON.stringify("mkdir -p papers/p1 && cp fig.pdf papers/p1/"),
+              toolSummary: JSON.stringify("Create dirs"),
+              WaitMsBeforeAsync: 5000,
+            },
+          },
+        ],
+      },
+      { step_index: 42, type: "GENERIC", status: "DONE", created_at: iso, content: "Edited file." },
+      { step_index: 43, type: "GENERIC", status: "DONE", created_at: iso, content: "Created file." },
+      { step_index: 44, type: "GENERIC", status: "DONE", created_at: iso, content: "Command exited with code 0." },
+    ]);
+
+    const detail = readChildStepDetail(brain, new Set(["worker-diff"]), "worker-diff", 41);
+    assert.ok(detail);
+    assert.equal(detail.toolCalls.length, 3);
+
+    // 1. edit_file -> structured LCS diff, no raw JSON argsText
+    const editTc = detail.toolCalls[0];
+    assert.ok(editTc?.diff);
+    assert.equal(editTc.diff.mode, "edit");
+    assert.equal(editTc.diff.addedLines, 2);
+    assert.equal(editTc.diff.removedLines, 1);
+    assert.equal(editTc.argsText, null);
+    assert.ok(editTc.diff.lines.some((l) => l.kind === "del" && l.text === "old line 2"));
+    assert.ok(editTc.diff.lines.some((l) => l.kind === "add" && l.text === "new line 2a"));
+    assert.ok(editTc.diff.lines.some((l) => l.kind === "ctx" && l.text === "line 1"));
+
+    // 2. write_file -> structured added lines with unescaped newlines, no raw JSON Content blob
+    const writeTc = detail.toolCalls[1];
+    assert.ok(writeTc?.diff);
+    assert.equal(writeTc.diff.mode, "write");
+    assert.equal(writeTc.diff.addedLines, 4);
+    assert.equal(writeTc.diff.removedLines, 0);
+    assert.equal(writeTc.diff.lines[0]?.text, "\\documentclass{article}");
+    assert.equal(writeTc.argsText, null);
+    assert.equal(writeTc.subtitle, "…/p1/main.tex");
+
+    // 3. run_command -> clean command string & subtitle, no noisy WaitMsBeforeAsync JSON
+    const cmdTc = detail.toolCalls[2];
+    assert.equal(cmdTc?.command, "mkdir -p papers/p1 && cp fig.pdf papers/p1/");
+    assert.equal(cmdTc?.argsText, null);
+    assert.equal(cmdTc?.output, "Command exited with code 0.");
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
