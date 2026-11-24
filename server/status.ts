@@ -8,6 +8,8 @@ import type {
   BgTaskItem,
   PlanStatus,
   PlanStep,
+  ProgressSummary,
+  StepProgress,
   SubagentCategory,
   SubagentItem,
   SwarmMember,
@@ -80,6 +82,10 @@ interface RawSwarmPlanFile {
     title?: string;
     line?: string;
   };
+  tasks?: Record<string, string>;
+  threads?: Array<{
+    tasks?: string[];
+  }>;
 }
 
 interface RawSubagentFile {
@@ -95,10 +101,12 @@ interface RawSubagentFile {
 interface ChildConvStatus {
   lastType: string | null;
   lastStatus: string | null;
+  firstTs: number | null;
   lastTs: number | null;
   model: string | null;
   lastActivity: string | null;
   stepCount: number;
+  stepProgress: StepProgress | null;
   hasAskQ: boolean;
   stopIdle: boolean;
   stopBusy: boolean;
@@ -637,7 +645,9 @@ function inspectChildConv(brainRoot: string, conversationId: string): ChildConvS
 
   const hs = readJsonSafe<HookStateJson>(hsPath);
   const rows = readTranscriptRows(txPath);
+  const fr = rows.length > 0 ? rows[0] : null;
   const lr = rows.length > 0 ? rows[rows.length - 1] : null;
+  const firstTs = parseIsoMs(fr?.created_at);
   const lastTs = parseIsoMs(lr?.created_at);
 
   let lu = -1;
@@ -653,14 +663,21 @@ function inspectChildConv(brainRoot: string, conversationId: string): ChildConvS
   const stopIdle = Boolean(!hasAskQ && hs?.event === "Stop" && hs.fullyIdle === true && hsFresh);
   const stopBusy = Boolean(!hasAskQ && hs?.event === "Stop" && hs.fullyIdle === false && hsFresh);
   const { model, lastActivity } = summarizeRecentActivity(rows);
+  const childPlan = extractPlanStatus(rows);
+  const stepProgress =
+    childPlan && childPlan.total > 0
+      ? { done: childPlan.completed, total: childPlan.total }
+      : null;
 
   return {
     lastType: lr?.type ?? null,
     lastStatus: lr?.status ?? null,
+    firstTs,
     lastTs,
     model,
     lastActivity,
     stepCount: rows.length,
+    stepProgress,
     hasAskQ,
     stopIdle,
     stopBusy,
@@ -722,28 +739,278 @@ function scanSubagentTree(
   return { nodes, freshestMtimeMs };
 }
 
-function readBoardQuickMeta(boardPath: string): { count: number; latestSeq: number; mtimeMs: number } {
+const ROLE_WORKER_RE = /^(?:narrator|monitor)(?:-\d+)?$/i;
+const DONE_POST_RE =
+  /^(@[A-Za-z0-9_-]+[\s,:–—-]*)*(?:\*\*|\*|`|_)?\[done\](?:\*\*|\*|`|_)?/i;
+
+function isRoleWorkerName(name: string): boolean {
+  return ROLE_WORKER_RE.test(name);
+}
+
+function readBoardQuickMeta(boardPath: string): {
+  count: number;
+  latestSeq: number;
+  mtimeMs: number;
+  doneAgents: Set<string>;
+} {
   const mtimeMs = readMtimeMs(boardPath);
-  if (mtimeMs === 0) return { count: 0, latestSeq: 0, mtimeMs: 0 };
+  const doneAgents = new Set<string>();
+  if (mtimeMs === 0) return { count: 0, latestSeq: 0, mtimeMs: 0, doneAgents };
   try {
     const raw = readFileSync(boardPath, "utf8");
     const lines = raw.split("\n").filter((l) => l.trim().length > 0);
     let latestSeq = lines.length;
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const lastTextByAgent = new Map<string, string>();
+    for (const line of lines) {
       try {
-        const obj = JSON.parse(lines[i]) as { seq?: number };
-        if (typeof obj.seq === "number") {
+        const obj = JSON.parse(line) as { seq?: number; agent?: string; text?: string };
+        if (typeof obj.seq === "number" && obj.seq > latestSeq) {
           latestSeq = obj.seq;
-          break;
+        }
+        if (typeof obj.agent === "string" && typeof obj.text === "string") {
+          lastTextByAgent.set(obj.agent, obj.text.trim());
         }
       } catch {
         // skip partial line
       }
     }
-    return { count: lines.length, latestSeq, mtimeMs };
+    if (lines.length > 0) {
+      try {
+        const last = JSON.parse(lines[lines.length - 1]) as { seq?: number };
+        if (typeof last.seq === "number") latestSeq = last.seq;
+      } catch {
+        // keep latestSeq
+      }
+    }
+    for (const [agent, text] of lastTextByAgent) {
+      if (DONE_POST_RE.test(text)) {
+        doneAgents.add(agent);
+      }
+    }
+    return { count: lines.length, latestSeq, mtimeMs, doneAgents };
   } catch {
-    return { count: 0, latestSeq: 0, mtimeMs };
+    return { count: 0, latestSeq: 0, mtimeMs, doneAgents };
   }
+}
+
+function computeProgress(input: {
+  now: number;
+  primaryMode: AgyPrimaryMode;
+  swarm: AgentBgStatus["swarm"];
+  rawSwarmPlan: RawSwarmPlanFile | null;
+  teamwork: TeamworkStatus | null;
+  plan: PlanStatus | null;
+  workflows: WorkflowRun[];
+  subagents: SubagentItem[];
+}): ProgressSummary | null {
+  const { now, primaryMode, swarm, rawSwarmPlan, teamwork, plan, workflows, subagents } = input;
+
+  // Helper to compute parallel ETA from per-unit start/duration arrays
+  const finalizeTiming = (
+    items: Array<{
+      done: boolean;
+      running: boolean;
+      startedAt: number | null;
+      updatedAt: number | null;
+      durationMs: number | null;
+    }>,
+    counts: { completed: number; running: number; waiting: number; failed: number; total: number },
+    scopeLabel: string,
+  ): ProgressSummary => {
+    const { completed, running, waiting, failed, total } = counts;
+    const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+
+    const starts = items
+      .map((x) => x.startedAt)
+      .filter((t): t is number => typeof t === "number" && t > 0);
+    const startedAt = starts.length > 0 ? Math.min(...starts) : null;
+
+    const allDone = total > 0 && completed >= total && running === 0 && failed === 0;
+    const ends = items
+      .map((x) => x.updatedAt)
+      .filter((t): t is number => typeof t === "number" && t > 0);
+    const endTs = allDone && ends.length > 0 ? Math.max(...ends) : now;
+    const elapsedMs = startedAt !== null ? Math.max(0, Math.round(endTs - startedAt)) : null;
+
+    const doneDurations = items
+      .filter((x) => x.done && typeof x.durationMs === "number" && x.durationMs > 0)
+      .map((x) => x.durationMs as number);
+    const avgDurationMs =
+      doneDurations.length > 0
+        ? Math.round(doneDurations.reduce((a, b) => a + b, 0) / doneDurations.length)
+        : null;
+
+    let etaMs: number | null = null;
+    let etaState: ProgressSummary["etaState"] = "none";
+    if (allDone) {
+      etaMs = 0;
+      etaState = "done";
+    } else if (running > 0 || waiting > 0) {
+      if (avgDurationMs !== null) {
+        const activeItems = items.filter((x) => !x.done);
+        const remainingEstimates = activeItems.map((x) => {
+          const itemElapsed =
+            x.startedAt !== null ? Math.max(0, now - x.startedAt) : 0;
+          return avgDurationMs - itemElapsed;
+        });
+        const maxRem = remainingEstimates.length > 0 ? Math.max(...remainingEstimates) : 0;
+        if (maxRem > 15_000) {
+          etaMs = Math.round(maxRem);
+          etaState = "estimated";
+        } else {
+          etaMs = null;
+          etaState = "over_avg";
+        }
+      } else {
+        etaState = "estimating";
+      }
+    }
+
+    return {
+      completed,
+      running,
+      waiting,
+      failed,
+      total,
+      percent,
+      scopeLabel,
+      startedAt,
+      elapsedMs,
+      avgDurationMs,
+      etaMs,
+      etaState,
+    };
+  };
+
+  if (swarm && (primaryMode === "swarm" || (primaryMode !== "teamwork" && swarm.members.length > 0))) {
+    const taskMembers = swarm.members.filter((m) => !isRoleWorkerName(m.name));
+    const planNames = new Set<string>();
+    if (rawSwarmPlan?.tasks) {
+      for (const k of Object.keys(rawSwarmPlan.tasks)) planNames.add(k);
+    }
+    if (Array.isArray(rawSwarmPlan?.threads)) {
+      for (const th of rawSwarmPlan.threads) {
+        for (const n of th.tasks ?? []) planNames.add(n);
+      }
+    }
+    const waveMembers =
+      planNames.size > 0
+        ? taskMembers.filter((m) => planNames.has(m.name))
+        : taskMembers;
+    const scopeMembers = waveMembers.length > 0 ? waveMembers : taskMembers;
+    const scopeLabel = planNames.size > 0 && waveMembers.length > 0 ? "当前波次" : "Swarm 成员";
+
+    if (scopeMembers.length > 0) {
+      let completed = 0;
+      let running = 0;
+      let waiting = 0;
+      let failed = 0;
+      const items = scopeMembers.map((m) => {
+        const isDone =
+          m.state === "completed" ||
+          m.state === "canceled" ||
+          m.state === "stopped" ||
+          (m.state === "waiting" && Boolean(m.delivered));
+        if (isDone) completed += 1;
+        else if (m.state === "working") running += 1;
+        else if (m.state === "failed") failed += 1;
+        else waiting += 1;
+        return {
+          done: isDone,
+          running: m.state === "working",
+          startedAt: m.startedAt ?? null,
+          updatedAt: m.updatedAt ?? null,
+          durationMs: m.durationMs ?? null,
+        };
+      });
+      return finalizeTiming(
+        items,
+        { completed, running, waiting, failed, total: scopeMembers.length },
+        scopeLabel,
+      );
+    }
+  }
+
+  if (teamwork && teamwork.totalNodes > 0) {
+    const items = teamwork.nodes.map((n) => ({
+      done: n.state === "completed" || n.state === "canceled",
+      running: n.state === "running",
+      startedAt: n.startedAt ?? null,
+      updatedAt: n.updatedAt ?? null,
+      durationMs: n.durationMs ?? null,
+    }));
+    return finalizeTiming(
+      items,
+      {
+        completed: teamwork.completedNodes,
+        running: teamwork.runningNodes,
+        waiting: 0,
+        failed: teamwork.failedNodes,
+        total: teamwork.totalNodes,
+      },
+      "Teamwork 节点",
+    );
+  }
+
+  if (plan && plan.total > 0) {
+    const running = plan.steps.filter((s) => s.status === "in_progress").length;
+    const failed = plan.steps.filter((s) => s.status === "failed").length;
+    const waiting = Math.max(0, plan.total - plan.completed - running - failed);
+    return {
+      completed: plan.completed,
+      running,
+      waiting,
+      failed,
+      total: plan.total,
+      percent: Math.min(100, Math.round((plan.completed / plan.total) * 100)),
+      scopeLabel: "任务步骤",
+      startedAt: null,
+      elapsedMs: null,
+      avgDurationMs: null,
+      etaMs: null,
+      etaState: plan.completed >= plan.total ? "done" : "none",
+    };
+  }
+
+  if (subagents.length > 0) {
+    const completed = subagents.filter((s) => s.state === "completed" || s.state === "canceled").length;
+    const running = subagents.filter((s) => s.state === "running").length;
+    const failed = subagents.filter((s) => s.state === "failed").length;
+    const items = subagents.map((s) => ({
+      done: s.state === "completed" || s.state === "canceled",
+      running: s.state === "running",
+      startedAt: s.startedAt ?? null,
+      updatedAt: s.updatedAt ?? null,
+      durationMs: s.durationMs ?? null,
+    }));
+    return finalizeTiming(
+      items,
+      { completed, running, waiting: 0, failed, total: subagents.length },
+      "子代理",
+    );
+  }
+
+  if (workflows.length > 0) {
+    const completed = workflows.filter((w) => w.status === "completed").length;
+    const running = workflows.filter((w) => w.status === "running").length;
+    const failed = workflows.filter((w) => w.status === "failed").length;
+    return {
+      completed,
+      running,
+      waiting: 0,
+      failed,
+      total: workflows.length,
+      percent: Math.min(100, Math.round((completed / workflows.length) * 100)),
+      scopeLabel: "Workflow",
+      startedAt: workflows[0]?.startedAt ?? null,
+      elapsedMs: workflows[0]?.startedAt ? Math.max(0, now - workflows[0].startedAt) : null,
+      avgDurationMs: null,
+      etaMs: null,
+      etaState: completed >= workflows.length ? "done" : "none",
+    };
+  }
+
+  return null;
 }
 
 function inferTeamworkPhase(nodes: SubagentItem[]): TeamworkPhase {
@@ -862,10 +1129,12 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
         : {
             lastType: null,
             lastStatus: null,
+            firstTs: null,
             lastTs: null,
             model: null,
             lastActivity: null,
             stepCount: 0,
+            stepProgress: null,
             hasAskQ: false,
             stopIdle: false,
             stopBusy: false,
@@ -946,12 +1215,26 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     } else {
       state = "waiting";
     }
+    const delivered = boardMeta.doneAgents.has(name);
+    const isFinishedMember =
+      state === "completed" ||
+      state === "failed" ||
+      state === "stopped" ||
+      (state === "waiting" && delivered);
+    const endTs = isFinishedMember ? (child.lastTs ?? now) : now;
+    const durationMs =
+      child.firstTs !== null ? Math.max(0, Math.round(endTs - child.firstTs)) : null;
+
     return {
       name,
       conversationId: raw.conversation_id ?? "",
       model: raw.model ?? child.model ?? null,
       state,
       updatedAt: child.lastTs,
+      startedAt: child.firstTs,
+      durationMs,
+      delivered,
+      stepProgress: child.stepProgress,
       workspaceMode: raw.workspace_mode ?? null,
       workspace: raw.workspace ?? null,
       lastReadSeq: typeof raw.last_read_seq === "number" ? raw.last_read_seq : null,
@@ -983,6 +1266,9 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
       }
       const typeName = raw.subagentDescriptor?.typeName ?? "subagent";
       const role = raw.subagentDescriptor?.role ?? id.slice(0, 8);
+      const endTs = state === "running" ? now : (child.lastTs ?? now);
+      const durationMs =
+        child.firstTs !== null ? Math.max(0, Math.round(endTs - child.firstTs)) : null;
       return {
         isTeamworkBranch,
         item: {
@@ -996,6 +1282,9 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
           model: child.model,
           lastActivity: child.lastActivity,
           stepCount: child.stepCount,
+          stepProgress: child.stepProgress,
+          startedAt: child.firstTs,
+          durationMs,
           workspace: formatWorkspaceUri(raw.workspaceUris?.[0]),
           updatedAt: child.lastTs,
         },
@@ -1149,6 +1438,16 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
   else if (subagents.length > 0) primaryMode = "subagents";
 
   const hasConsoleData = modes.length > 0;
+  const progress = computeProgress({
+    now,
+    primaryMode,
+    swarm,
+    rawSwarmPlan,
+    teamwork,
+    plan,
+    workflows,
+    subagents,
+  });
 
   let pillLabel = "";
   if (swarm && swarmActive) {
@@ -1203,6 +1502,7 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     modes,
     primaryMode,
     hasConsoleData,
+    progress,
     coordinatorState,
     pillLabel,
     summaryLine,

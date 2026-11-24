@@ -16,6 +16,7 @@ import {
   unregisterAgentWorkspace,
 } from "./client/store.ts";
 import { AgyToolCard } from "./client/timeline-card.tsx";
+import { formatDurationShort } from "./client/progress-bar.tsx";
 import { transformAgyOtherToolCall } from "./client/timeline-transformer.ts";
 import { agyLifecycleWatch, type AgentBgStatus } from "./shared/rpc.ts";
 import { AgyToolCardSchema } from "./shared/timeline.ts";
@@ -35,20 +36,72 @@ function isAgyProvider(provider: string | null | undefined): boolean {
 
 function resolvePillPresentation(st: AgentBgStatus | null): { visible: boolean; label: string } {
   if (!st) return { visible: false, label: DEFAULT_LABEL };
+  const prog = st.progress ?? null;
+
   if (st.backgroundActive) {
+    if (st.swarm && prog && (st.primaryMode === "swarm" || st.swarm.working > 0)) {
+      const pct = `${prog.percent}% (${prog.completed}/${prog.total})`;
+      const timeHint =
+        prog.etaState === "estimated" && prog.etaMs !== null
+          ? ` · ~${formatDurationShort(prog.etaMs)}`
+          : prog.etaState === "over_avg"
+            ? " · 收尾中"
+            : prog.elapsedMs && prog.elapsedMs >= 60_000
+              ? ` · ${formatDurationShort(prog.elapsedMs)}`
+              : "";
+      const runTag = prog.running > 0 ? ` · ${prog.running}运行` : "";
+      return {
+        visible: true,
+        label: `Swarm ${pct}${runTag}${timeHint}`,
+      };
+    }
+    if (st.teamwork && st.teamwork.active && prog) {
+      const eta =
+        prog.etaState === "estimated" && prog.etaMs !== null
+          ? ` · ~${formatDurationShort(prog.etaMs)}`
+          : "";
+      return {
+        visible: true,
+        label: `Teamwork ${prog.percent}% (${prog.completed}/${prog.total})${eta}`,
+      };
+    }
+    if (prog && prog.total > 0 && (st.primaryMode === "subagents" || st.primaryMode === "workflow")) {
+      const prefix = st.primaryMode === "workflow" ? "Workflow" : "子代理";
+      return {
+        visible: true,
+        label: `${prefix} ${prog.percent}% (${prog.completed}/${prog.total})`,
+      };
+    }
     return {
       visible: true,
       label: st.pillLabel && st.pillLabel.length > 0 ? st.pillLabel : DEFAULT_LABEL,
     };
   }
+
   if (st.goalActive) {
-    return { visible: true, label: "/goal 循环中" };
+    const planHint =
+      st.plan && st.plan.total > 0
+        ? ` · ${Math.round((st.plan.completed / st.plan.total) * 100)}% (${st.plan.completed}/${st.plan.total})`
+        : "";
+    return { visible: true, label: `/goal${planHint || " 循环中"}` };
   }
   if (st.swarm) {
-    return { visible: true, label: "Swarm ✓" };
+    const doneTag = prog ? ` ${prog.percent}% (${prog.completed}/${prog.total})` : "";
+    return { visible: true, label: `Swarm ✓${doneTag}` };
   }
   if (st.teamwork) {
-    return { visible: true, label: "Teamwork ✓" };
+    const doneTag = prog ? ` ${prog.percent}% (${prog.completed}/${prog.total})` : "";
+    return { visible: true, label: `Teamwork ✓${doneTag}` };
+  }
+  if (st.plan && st.plan.total > 0) {
+    const pct = Math.round((st.plan.completed / st.plan.total) * 100);
+    return {
+      visible: true,
+      label:
+        st.plan.completed >= st.plan.total
+          ? `任务 ✓ (${st.plan.completed}/${st.plan.total})`
+          : `任务 ${pct}% (${st.plan.completed}/${st.plan.total})`,
+    };
   }
   if (st.workflows && st.workflows.length > 0) {
     return { visible: true, label: "Workflow ✓" };
@@ -69,7 +122,7 @@ export default function contribute(client: PluginClientContext) {
     client.openPanel(AGY_CONSOLE_PANEL_ID, {
       workspaceId,
       agentId,
-      location: "workspace",
+      location: "explorer",
     });
   };
   setOpenConsoleHandler(openConsole);
@@ -100,32 +153,32 @@ export default function contribute(client: PluginClientContext) {
   // 3. Slash commands (/swarm-board, /agy-board) and Command Center entry
   const disposeSwarmSlash = client.addSlashCommand({
     name: "swarm-board",
-    description: "打开 Antigravity Swarm / Teamwork 实时控制台面板",
+    description: "在侧栏打开 Antigravity Swarm / Teamwork 实时控制台面板",
     argumentHint: "",
     context: "agent",
     onSubmit({ openPanel }) {
-      openPanel(AGY_CONSOLE_PANEL_ID, { location: "workspace" });
+      openPanel(AGY_CONSOLE_PANEL_ID, { location: "explorer" });
     },
   });
 
   const disposeAgySlash = client.addSlashCommand({
     name: "agy-board",
-    description: "打开 Antigravity 全模式控制台（Swarm / Teamwork / Boost / Goal / Plan）",
+    description: "在侧栏打开 Antigravity 全模式控制台（Swarm / Teamwork / Boost / Goal / Plan）",
     argumentHint: "",
     context: "agent",
     onSubmit({ openPanel }) {
-      openPanel(AGY_CONSOLE_PANEL_ID, { location: "workspace" });
+      openPanel(AGY_CONSOLE_PANEL_ID, { location: "explorer" });
     },
   });
 
   const disposeCommandCenter = client.addCommandCenterItem({
     id: "open-agy-console",
-    title: "打开 Antigravity 控制台 (Swarm / Teamwork)",
+    title: "在侧栏打开 Antigravity 控制台 (Swarm / Teamwork)",
     icon: "Layers",
     keywords: ["swarm", "board", "teamwork", "boost", "goal", "antigravity", "agy"],
     context: "agent",
     onSelect({ openPanel }) {
-      openPanel(AGY_CONSOLE_PANEL_ID, { location: "workspace" });
+      openPanel(AGY_CONSOLE_PANEL_ID, { location: "explorer" });
     },
   });
 

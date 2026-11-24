@@ -50,12 +50,36 @@ export const SubagentCategorySchema = z.enum([
   "other",
 ]);
 
+export const StepProgressSchema = z.object({
+  done: z.number().int(),
+  total: z.number().int(),
+});
+
+export const ProgressSummarySchema = z.object({
+  completed: z.number().int(),
+  running: z.number().int(),
+  waiting: z.number().int(),
+  failed: z.number().int(),
+  total: z.number().int(),
+  percent: z.number().int().min(0).max(100),
+  scopeLabel: z.string(),
+  startedAt: z.number().nullable(),
+  elapsedMs: z.number().int().nullable(),
+  avgDurationMs: z.number().int().nullable(),
+  etaMs: z.number().int().nullable(),
+  etaState: z.enum(["estimating", "estimated", "over_avg", "done", "none"]),
+});
+
 export const SwarmMemberSchema = z.object({
   name: z.string(),
   conversationId: z.string(),
   model: z.string().nullable(),
   state: z.enum(["working", "waiting", "completed", "failed", "canceled", "stopped"]),
   updatedAt: z.number().nullable(),
+  startedAt: z.number().nullable().optional(),
+  durationMs: z.number().int().nullable().optional(),
+  delivered: z.boolean().optional(),
+  stepProgress: StepProgressSchema.nullable().optional(),
   workspaceMode: z.string().nullable().optional(),
   workspace: z.string().nullable().optional(),
   lastReadSeq: z.number().int().nullable().optional(),
@@ -70,6 +94,9 @@ export const SubagentItemSchema = z.object({
   typeName: z.string(),
   state: z.enum(["running", "completed", "failed", "canceled"]),
   updatedAt: z.number().nullable(),
+  startedAt: z.number().nullable().optional(),
+  durationMs: z.number().int().nullable().optional(),
+  stepProgress: StepProgressSchema.nullable().optional(),
   parentId: z.string().nullable().optional(),
   depth: z.number().int().optional(),
   category: SubagentCategorySchema.optional(),
@@ -167,6 +194,7 @@ export const AgentBgStatusSchema = z.object({
   modes: z.array(AgyModeSchema).optional(),
   primaryMode: AgyPrimaryModeSchema.optional(),
   hasConsoleData: z.boolean().optional(),
+  progress: ProgressSummarySchema.nullable().optional(),
   coordinatorState: z.enum([
     "idle",
     "swarm_wait",
@@ -268,6 +296,8 @@ export type AgyMode = z.infer<typeof AgyModeSchema>;
 export type AgyPrimaryMode = z.infer<typeof AgyPrimaryModeSchema>;
 export type TeamworkPhase = z.infer<typeof TeamworkPhaseSchema>;
 export type SubagentCategory = z.infer<typeof SubagentCategorySchema>;
+export type StepProgress = z.infer<typeof StepProgressSchema>;
+export type ProgressSummary = z.infer<typeof ProgressSummarySchema>;
 export type SwarmMember = z.infer<typeof SwarmMemberSchema>;
 export type SubagentItem = z.infer<typeof SubagentItemSchema>;
 export type BgTaskItem = z.infer<typeof BgTaskItemSchema>;

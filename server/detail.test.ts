@@ -220,3 +220,96 @@ test("inspectAgyConsole parses swarm plan.json, board.jsonl slices, and enforces
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
+
+test("inspectAgySession computes current-wave Swarm progress percentage, [done] delivery, and parallel ETA", () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-eta-"));
+  try {
+    const now = Date.now();
+    const brain = path.join(homeDir, ".gemini", "antigravity-cli", "brain");
+    const tStart = new Date(now - 10 * 60_000).toISOString();
+    const tDone1 = new Date(now - 2 * 60_000).toISOString(); // 8m duration
+    const tStart2 = new Date(now - 5 * 60_000).toISOString(); // 5m elapsed so far -> ~3m remaining
+
+    writeJsonl(path.join(brain, "wave-coord", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tStart, content: "/swarm wave2" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: tDone1, tool_calls: [{ name: "swarm_wait", args: { since: 2 } }] },
+    ]);
+    writeJson(path.join(brain, "wave-coord", ".system_generated", "logs", "process.json"), {
+      conversationId: "wave-coord",
+      pid: 88888,
+      event: "PreInvocation",
+      ts: now - 10_000,
+    });
+    writeJson(path.join(brain, "wave-coord", ".system_generated", "swarm", "members.json"), {
+      title: "Wave 2",
+      members: {
+        coordinator: { conversation_id: "wave-coord", role: "coordinator" },
+        "old-wave1": { conversation_id: "w-old", role: "worker", killed: true, phase: "KILLED" },
+        monitor: { conversation_id: "w-mon", role: "worker", killed: false, phase: "RUNNING", wait_since: 2, last_nudged_seq: 2 },
+        "lane-a": { conversation_id: "w-a", role: "worker", killed: false, phase: "RUNNING", wait_since: 2, last_nudged_seq: 2 },
+        "lane-b": { conversation_id: "w-b", role: "worker", killed: false, phase: "RUNNING", wait_since: 1, last_nudged_seq: 2 },
+      },
+    });
+    writeJson(path.join(brain, "wave-coord", ".system_generated", "swarm", "plan.json"), {
+      goal: { title: "Wave 2 Goal", line: "Two lanes" },
+      tasks: { "lane-a": "Lane A", "lane-b": "Lane B" },
+      threads: [{ id: "t1", title: "Lanes", goal: "Finish", tasks: ["lane-a", "lane-b"] }],
+    });
+    writeJsonl(path.join(brain, "wave-coord", ".system_generated", "swarm", "board.jsonl"), [
+      { seq: 1, agent: "coordinator", text: "@lane-a @lane-b post [done] when finished", time: "2026-11-24 15:00:00" },
+      { seq: 2, agent: "lane-a", text: "@coordinator [done] Lane A passed all checks", time: "2026-11-24 15:08:00" },
+    ]);
+    writeJsonl(path.join(brain, "w-a", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tStart, content: "do A" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: tDone1, content: "done" },
+    ]);
+    writeJson(path.join(brain, "w-a", ".system_generated", "logs", "hook-state.json"), {
+      conversationId: "w-a",
+      event: "Stop",
+      fullyIdle: true,
+      ts: now - 2 * 60_000,
+    });
+    writeJsonl(path.join(brain, "w-b", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: tStart2, content: "do B" },
+      {
+        step_index: 2,
+        type: "PLANNER_RESPONSE",
+        status: "RUNNING",
+        created_at: new Date(now - 5_000).toISOString(),
+        tool_calls: [
+          {
+            name: "update_steps",
+            args: {
+              steps: JSON.stringify([
+                { title: "s1", status: "done" },
+                { title: "s2", status: "in_progress" },
+              ]),
+            },
+          },
+        ],
+      },
+    ]);
+
+    const st = inspectAgySession({
+      agentId: "agent-eta",
+      sessionId: "wave-coord",
+      agentAlive: true,
+      homeDir,
+      now,
+      isPidAlive: () => true,
+    });
+    assert.ok(st);
+    assert.ok(st.progress);
+    assert.equal(st.progress.scopeLabel, "当前波次");
+    assert.equal(st.progress.total, 2); // excludes old-wave1 & monitor
+    assert.equal(st.progress.completed, 1); // lane-a delivered via [done] even before kill!
+    assert.equal(st.progress.running, 1);
+    assert.equal(st.progress.percent, 50);
+    assert.equal(st.progress.etaState, "estimated");
+    assert.ok((st.progress.etaMs ?? 0) > 2 * 60_000 && (st.progress.etaMs ?? 0) < 4 * 60_000);
+    const laneB = st.swarm?.members.find((m) => m.name === "lane-b");
+    assert.deepEqual(laneB?.stepProgress, { done: 1, total: 2 });
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});

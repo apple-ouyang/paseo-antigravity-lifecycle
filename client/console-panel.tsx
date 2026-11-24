@@ -18,6 +18,7 @@ import {
   type TeamworkPhase,
   type TranscriptStep,
 } from "../shared/rpc.ts";
+import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
 import { getStatusSnapshot, subscribeStatus } from "./store.ts";
 
 type ConsoleTab = "overview" | "board" | "members" | "tree";
@@ -60,7 +61,8 @@ function isMemberDoneOrRetired(member: SwarmMember): boolean {
   return (
     member.state === "completed" ||
     member.state === "canceled" ||
-    member.state === "stopped"
+    member.state === "stopped" ||
+    (member.state === "waiting" && Boolean(member.delivered))
   );
 }
 
@@ -298,9 +300,13 @@ function MemberRow({
   theme: PluginTheme;
   onOpen: () => void;
 }) {
-  const meta = stateMeta(member.state, theme);
+  const delivered = member.state === "waiting" && Boolean(member.delivered);
+  const meta = delivered
+    ? { label: "已交活 ✓", color: theme.colors.statusSuccess }
+    : stateMeta(member.state, theme);
   const retired = isMemberDoneOrRetired(member);
   const cleanAct = member.lastActivity ? stripDonePrefix(member.lastActivity) : null;
+  const dur = formatDurationShort(member.durationMs);
   return (
     <Pressable
       disabled={!member.conversationId}
@@ -321,14 +327,19 @@ function MemberRow({
           <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }} numberOfLines={1}>
             @{member.name}
           </Text>
+          {member.stepProgress ? (
+            <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
+              {member.stepProgress.done}/{member.stepProgress.total}步
+            </Text>
+          ) : null}
+          {dur ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+              {retired ? dur : `已跑 ${dur}`}
+            </Text>
+          ) : null}
           {member.workspaceMode && member.workspaceMode !== "inherit" ? (
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
               {member.workspaceMode}
-            </Text>
-          ) : null}
-          {member.model ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }} numberOfLines={1}>
-              {member.model}
             </Text>
           ) : null}
         </View>
@@ -953,9 +964,82 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         </View>
       </View>
 
-      {/* TAB 1: OVERVIEW (Official hive.js layout: Goal -> Running -> Collapsed Progress -> Open Threads -> Collapsed Done Threads -> Live Team filter) */}
+      {/* TAB 1: OVERVIEW (Progress meter -> Task checklist at top -> Goal -> Running -> Collapsed Progress -> Open Threads -> Collapsed Done Threads -> Live Team) */}
       {tab === "overview" ? (
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 10 }}>
+          {/* 0. Real-time percentage progress bar + elapsed + ETA */}
+          {status.progress ? <ProgressMeter progress={status.progress} theme={theme} /> : null}
+
+          {/* 0.5 Task checklist pinned right at the top */}
+          {plan ? (
+            plan.inPlanMode || plan.completed < plan.total ? (
+              <SectionCard
+                title={plan.inPlanMode ? "任务清单（规划中）" : "任务清单"}
+                right={
+                  plan.total > 0
+                    ? `${plan.completed}/${plan.total} (${Math.round((plan.completed / plan.total) * 100)}%)`
+                    : undefined
+                }
+                theme={theme}
+              >
+                {plan.steps
+                  .filter((s) => s.status !== "done" && s.status !== "skipped")
+                  .map((s, idx) => (
+                    <View key={`${idx}-${s.title}`} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      <Text
+                        style={{
+                          color:
+                            s.status === "in_progress"
+                              ? theme.colors.accent
+                              : s.status === "failed"
+                                ? theme.colors.statusDanger
+                                : theme.colors.foregroundMuted,
+                          fontSize: 12,
+                          width: 14,
+                        }}
+                      >
+                        {s.status === "in_progress" ? "◐" : s.status === "failed" ? "✕" : "○"}
+                      </Text>
+                      <Text style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }}>
+                        {s.title}
+                      </Text>
+                    </View>
+                  ))}
+                {plan.completed > 0 ? (
+                  <Pressable onPress={() => setDonePlanOpen((v) => !v)}>
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                      {donePlanOpen ? "▾ 收起已完成步骤" : `▸ 已隐藏 ${plan.completed} 个已完成步骤`}
+                    </Text>
+                  </Pressable>
+                ) : null}
+                {donePlanOpen
+                  ? plan.steps
+                      .filter((s) => s.status === "done" || s.status === "skipped")
+                      .map((s, idx) => (
+                        <Text key={`d-${idx}-${s.title}`} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                          ✓ {s.title}
+                        </Text>
+                      ))
+                  : null}
+              </SectionCard>
+            ) : (
+              <DisclosureBar
+                title={`✓ 任务清单已全部完成 (${plan.completed}/${plan.total} · 100%)`}
+                count="已折叠"
+                accentColor={theme.colors.statusSuccess}
+                open={donePlanOpen}
+                theme={theme}
+                onToggle={() => setDonePlanOpen((v) => !v)}
+              >
+                {plan.steps.map((s, idx) => (
+                  <Text key={`${idx}-${s.title}`} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                    ✓ {s.title}
+                  </Text>
+                ))}
+              </DisclosureBar>
+            )
+          ) : null}
+
           {/* 1. Goal card (compact 2 lines) */}
           {swarmPlan?.goal ? (
             <View
@@ -1234,72 +1318,6 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                 {status.goalSummary ?? "目标循环已激活，完成全部验收条件前不会提前停工。"}
               </Text>
             </SectionCard>
-          ) : null}
-
-          {/* Plan checklist (collapse done steps when all finished) */}
-          {plan ? (
-            plan.inPlanMode || plan.completed < plan.total ? (
-              <SectionCard
-                title={plan.inPlanMode ? "规划模式（进行中）" : "执行步骤清单"}
-                right={plan.total > 0 ? `${plan.completed}/${plan.total}` : undefined}
-                theme={theme}
-              >
-                {plan.steps
-                  .filter((s) => s.status !== "done" && s.status !== "skipped")
-                  .map((s, idx) => (
-                    <View key={`${idx}-${s.title}`} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                      <Text
-                        style={{
-                          color:
-                            s.status === "in_progress"
-                              ? theme.colors.accent
-                              : s.status === "failed"
-                                ? theme.colors.statusDanger
-                                : theme.colors.foregroundMuted,
-                          fontSize: 12,
-                          width: 14,
-                        }}
-                      >
-                        {s.status === "in_progress" ? "◐" : s.status === "failed" ? "✕" : "○"}
-                      </Text>
-                      <Text style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }}>
-                        {s.title}
-                      </Text>
-                    </View>
-                  ))}
-                {plan.completed > 0 ? (
-                  <Pressable onPress={() => setDonePlanOpen((v) => !v)}>
-                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-                      {donePlanOpen ? "▾ 收起已完成步骤" : `▸ 已隐藏 ${plan.completed} 个已完成步骤`}
-                    </Text>
-                  </Pressable>
-                ) : null}
-                {donePlanOpen
-                  ? plan.steps
-                      .filter((s) => s.status === "done" || s.status === "skipped")
-                      .map((s, idx) => (
-                        <Text key={`d-${idx}-${s.title}`} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-                          ✓ {s.title}
-                        </Text>
-                      ))
-                  : null}
-              </SectionCard>
-            ) : (
-              <DisclosureBar
-                title={`✓ 执行清单已全部完成 (${plan.completed}/${plan.total})`}
-                count="已折叠"
-                accentColor={theme.colors.statusSuccess}
-                open={donePlanOpen}
-                theme={theme}
-                onToggle={() => setDonePlanOpen((v) => !v)}
-              >
-                {plan.steps.map((s, idx) => (
-                  <Text key={`${idx}-${s.title}`} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-                    ✓ {s.title}
-                  </Text>
-                ))}
-              </DisclosureBar>
-            )
           ) : null}
 
           {/* Running workflows & background tasks only */}
