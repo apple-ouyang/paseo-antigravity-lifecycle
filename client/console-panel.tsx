@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import {
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+} from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import {
   usePaseo,
@@ -504,14 +512,17 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   const [memberSearch, setMemberSearch] = useState("");
   const [donePlanOpen, setDonePlanOpen] = useState(false);
 
-  // Board tab controls
+  // Board tab controls (chronological chat order + pin-to-bottom by default, matching official AGY Swarm Board)
   const [boardFilter, setBoardFilter] = useState<string>("all");
   const [boardSearch, setBoardSearch] = useState("");
-  const [boardNewestFirst, setBoardNewestFirst] = useState(true);
+  const [boardNewestFirst, setBoardNewestFirst] = useState(false);
   const [composeTarget, setComposeTarget] = useState<string>("coordinator");
   const [composeText, setComposeText] = useState("");
   const [sending, setSending] = useState(false);
   const [sendFeedback, setSendFeedback] = useState<string | null>(null);
+  const boardScrollRef = useRef<ScrollView | null>(null);
+  const boardPinnedRef = useRef(true);
+  const [boardScrolledAway, setBoardScrolledAway] = useState(false);
 
   // Teamwork / subagent tree controls (default hides completed!)
   const [showCompletedTree, setShowCompletedTree] = useState(false);
@@ -540,13 +551,16 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
         : "loading"
       : "ready",
   );
-  const [childNewestFirst, setChildNewestFirst] = useState(true);
+  const [childNewestFirst, setChildNewestFirst] = useState(false);
   const [childReplyText, setChildReplyText] = useState("");
   const [childSending, setChildSending] = useState(false);
   const [childSendFeedback, setChildSendFeedback] = useState<string | null>(null);
   const childReqSeqRef = useRef(0);
   const childRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const childRetryCountRef = useRef(0);
+  const childScrollRef = useRef<ScrollView | null>(null);
+  const childPinnedRef = useRef(true);
+  const [childScrolledAway, setChildScrolledAway] = useState(false);
 
   const selectChild = useCallback((next: SelectedChild) => {
     if (childRetryTimerRef.current) {
@@ -554,6 +568,8 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
       childRetryTimerRef.current = null;
     }
     childRetryCountRef.current = 0;
+    childPinnedRef.current = true;
+    setChildScrolledAway(false);
     const cached = getChildTranscriptCache(next.conversationId);
     setSelectedChild((prev) => {
       if (prev?.conversationId !== next.conversationId) {
@@ -567,6 +583,39 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
       return next;
     });
   }, []);
+
+  const handleChildScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
+    const nearBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 64;
+    childPinnedRef.current = nearBottom;
+    setChildScrolledAway((prev) => (prev === !nearBottom ? prev : !nearBottom));
+  }, []);
+
+  const handleBoardScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
+    const nearBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 64;
+    boardPinnedRef.current = nearBottom;
+    setBoardScrolledAway((prev) => (prev === !nearBottom ? prev : !nearBottom));
+  }, []);
+
+  const jumpChildToBottom = useCallback(() => {
+    childPinnedRef.current = true;
+    setChildScrolledAway(false);
+    childScrollRef.current?.scrollToEnd({ animated: true });
+  }, []);
+
+  const jumpBoardToBottom = useCallback(() => {
+    boardPinnedRef.current = true;
+    setBoardScrolledAway(false);
+    boardScrollRef.current?.scrollToEnd({ animated: true });
+  }, []);
+
+  useEffect(() => {
+    if (tab === "board") {
+      boardPinnedRef.current = true;
+      setBoardScrolledAway(false);
+    }
+  }, [tab, boardFilter]);
 
   useEffect(() => {
     if (!agentId || !navRequest) return;
@@ -947,11 +996,28 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                 />
               ) : null}
               <Chip
-                label={childNewestFirst ? "最新在前" : "对话正序"}
+                label={childNewestFirst ? "倒序 ⇅" : "正序 ⇅"}
                 color={theme.colors.foregroundMuted}
                 theme={theme}
-                onPress={() => setChildNewestFirst((v) => !v)}
+                onPress={() => {
+                  setChildNewestFirst((v) => {
+                    const next = !v;
+                    if (!next) {
+                      childPinnedRef.current = true;
+                      setChildScrolledAway(false);
+                    }
+                    return next;
+                  });
+                }}
               />
+              {!childNewestFirst && childScrolledAway ? (
+                <Chip
+                  label="回到底部 ↓"
+                  color={theme.colors.accent}
+                  theme={theme}
+                  onPress={jumpChildToBottom}
+                />
+              ) : null}
               {childFetchState === "loading" ? (
                 <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
                   加载中…
@@ -1019,7 +1085,18 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
           ) : null}
         </View>
 
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }}>
+        <ScrollView
+          ref={childScrollRef}
+          style={{ flex: 1 }}
+          contentContainerStyle={{ padding: 12, gap: 8 }}
+          scrollEventThrottle={100}
+          onScroll={handleChildScroll}
+          onContentSizeChange={() => {
+            if (!childNewestFirst && childPinnedRef.current) {
+              childScrollRef.current?.scrollToEnd({ animated: false });
+            }
+          }}
+        >
           {!childLoadedOnce && childSteps.length === 0 && childFetchState !== "error" ? (
             <View
               style={{
@@ -1839,11 +1916,29 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                   fontSize: 12,
                 }}
               />
-              <Pressable onPress={() => setBoardNewestFirst((v) => !v)}>
+              <Pressable
+                onPress={() => {
+                  setBoardNewestFirst((v) => {
+                    const next = !v;
+                    if (!next) {
+                      boardPinnedRef.current = true;
+                      setBoardScrolledAway(false);
+                    }
+                    return next;
+                  });
+                }}
+              >
                 <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
-                  {boardNewestFirst ? "最新在前 ⇅" : "正序 ⇅"}
+                  {boardNewestFirst ? "倒序 ⇅" : "正序 ⇅"}
                 </Text>
               </Pressable>
+              {!boardNewestFirst && boardScrolledAway ? (
+                <Pressable onPress={jumpBoardToBottom}>
+                  <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
+                    到底 ↓
+                  </Text>
+                </Pressable>
+              ) : null}
             </View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <View style={{ flexDirection: "row", gap: 6 }}>
@@ -1868,7 +1963,18 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             </ScrollView>
           </View>
 
-          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }}>
+          <ScrollView
+            ref={boardScrollRef}
+            style={{ flex: 1 }}
+            contentContainerStyle={{ padding: 12, gap: 8 }}
+            scrollEventThrottle={100}
+            onScroll={handleBoardScroll}
+            onContentSizeChange={() => {
+              if (!boardNewestFirst && boardPinnedRef.current) {
+                boardScrollRef.current?.scrollToEnd({ animated: false });
+              }
+            }}
+          >
             {filteredPosts.length === 0 ? (
               <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
                 当前筛选条件下暂无消息板记录。
