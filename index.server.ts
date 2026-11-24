@@ -1,8 +1,19 @@
+import { homedir } from "node:os";
+import path from "node:path";
 import type { PaseoApi, PaseoAgent } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import {
+  collectAllowedChildIds,
+  inspectAgyConsole,
+  readChildTranscript,
+  readSwarmBoard,
+} from "./server/detail.ts";
 import { ensureAntigravityHooksInstalled } from "./server/hooks.ts";
 import { inspectAgySession } from "./server/status.ts";
 import {
+  agyBoardSliceGet,
+  agyChildTranscriptGet,
+  agyConsoleGet,
   agyLifecycleGet,
   agyLifecycleWatch,
   type AgentBgStatus,
@@ -56,6 +67,23 @@ async function resolveSessionId(
   return sessionId;
 }
 
+async function resolveAgentAndSession(
+  paseo: PaseoApi,
+  agentId: string,
+  refreshedAt: Map<string, number>,
+): Promise<{ agent: PaseoAgent; sessionId: string } | null> {
+  const handle = paseo.agents.ref(agentId);
+  if (!handle.current() && Date.now() - (refreshedAt.get(agentId) ?? 0) > 1_000) {
+    refreshedAt.set(agentId, Date.now());
+    await handle.refresh().catch(() => null);
+  }
+  const agent = handle.current();
+  if (!agent || !isAgyProvider(agent.provider)) return null;
+  const sessionId = await resolveSessionId(paseo, agent, refreshedAt);
+  if (!sessionId) return null;
+  return { agent, sessionId };
+}
+
 async function collectActiveAgyAgents(
   paseo: PaseoApi,
   refreshedAt: Map<string, number>,
@@ -83,6 +111,7 @@ async function collectActiveAgyAgents(
 
 export default function contribute(server: PluginServerContext) {
   const refreshedAt = new Map<string, number>();
+  const brainRoot = path.join(homedir(), ".gemini", "antigravity-cli", "brain");
 
   try {
     const result = ensureAntigravityHooksInstalled();
@@ -109,20 +138,50 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.handle(agyLifecycleGet, async ({ agentId }, context) => {
-    const handle = context.paseo.agents.ref(agentId);
-    if (!handle.current() && Date.now() - (refreshedAt.get(agentId) ?? 0) > 1_000) {
-      refreshedAt.set(agentId, Date.now());
-      await handle.refresh().catch(() => null);
-    }
-    const agent = handle.current();
-    if (!agent || !isAgyProvider(agent.provider)) return null;
-    const sessionId = await resolveSessionId(context.paseo, agent, refreshedAt);
-    if (!sessionId) return null;
+    const resolved = await resolveAgentAndSession(context.paseo, agentId, refreshedAt);
+    if (!resolved) return null;
     return inspectAgySession({
-      agentId: agent.id,
-      sessionId,
-      agentAlive: !agent.archivedAt && agent.status !== "closed",
+      agentId: resolved.agent.id,
+      sessionId: resolved.sessionId,
+      agentAlive: !resolved.agent.archivedAt && resolved.agent.status !== "closed",
     });
+  });
+
+  server.handle(agyConsoleGet, async ({ agentId, boardLimit }, context) => {
+    const resolved = await resolveAgentAndSession(context.paseo, agentId, refreshedAt);
+    if (!resolved) return null;
+    return inspectAgyConsole({
+      agentId: resolved.agent.id,
+      sessionId: resolved.sessionId,
+      agentAlive: !resolved.agent.archivedAt && resolved.agent.status !== "closed",
+      boardLimit,
+    });
+  });
+
+  server.handle(agyBoardSliceGet, async ({ agentId, since, limit }, context) => {
+    const resolved = await resolveAgentAndSession(context.paseo, agentId, refreshedAt);
+    if (!resolved) return { posts: [], latestSeq: 0 };
+    const board = readSwarmBoard(brainRoot, resolved.sessionId, {
+      since,
+      limit: limit ?? 20,
+    });
+    return {
+      posts: board.posts,
+      latestSeq: board.latestSeq,
+    };
+  });
+
+  server.handle(agyChildTranscriptGet, async ({ agentId, conversationId, limit }, context) => {
+    const resolved = await resolveAgentAndSession(context.paseo, agentId, refreshedAt);
+    if (!resolved) return null;
+    const status = inspectAgySession({
+      agentId: resolved.agent.id,
+      sessionId: resolved.sessionId,
+      agentAlive: !resolved.agent.archivedAt && resolved.agent.status !== "closed",
+    });
+    if (!status) return null;
+    const allowed = collectAllowedChildIds(status);
+    return readChildTranscript(brainRoot, allowed, conversationId, limit ?? 40);
   });
 
   server.handle(agyLifecycleWatch, (_input, context) => {

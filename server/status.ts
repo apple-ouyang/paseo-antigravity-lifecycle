@@ -3,9 +3,17 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type {
   AgentBgStatus,
+  AgyMode,
+  AgyPrimaryMode,
   BgTaskItem,
+  PlanStatus,
+  PlanStep,
+  SubagentCategory,
   SubagentItem,
   SwarmMember,
+  TeamworkPhase,
+  TeamworkStatus,
+  WorkflowRun,
 } from "../shared/rpc.ts";
 
 export interface InspectAgySessionInput {
@@ -17,12 +25,14 @@ export interface InspectAgySessionInput {
   isPidAlive?: (pid: number) => boolean;
 }
 
-interface TranscriptRow {
+export interface TranscriptRow {
   step_index?: number;
   type?: string;
   status?: string;
   created_at?: string;
+  model?: string;
   content?: string;
+  thinking?: string;
   truncated_fields?: string[];
   tool_calls?: Array<{
     id?: string;
@@ -51,7 +61,10 @@ interface RawSwarmMember {
   role?: string;
   desired_state?: string;
   phase?: string;
+  workspace_mode?: string;
+  workspace?: string;
   wait_since?: number;
+  last_read_seq?: number;
   last_nudged_seq?: number;
   killed?: boolean;
   model?: string;
@@ -62,9 +75,17 @@ interface RawSwarmMembersFile {
   members?: Record<string, RawSwarmMember>;
 }
 
+interface RawSwarmPlanFile {
+  goal?: {
+    title?: string;
+    line?: string;
+  };
+}
+
 interface RawSubagentFile {
   conversationId?: string;
   state?: string;
+  workspaceUris?: string[];
   subagentDescriptor?: {
     typeName?: string;
     role?: string;
@@ -75,6 +96,9 @@ interface ChildConvStatus {
   lastType: string | null;
   lastStatus: string | null;
   lastTs: number | null;
+  model: string | null;
+  lastActivity: string | null;
+  stepCount: number;
   hasAskQ: boolean;
   stopIdle: boolean;
   stopBusy: boolean;
@@ -82,9 +106,20 @@ interface ChildConvStatus {
   freshestMtimeMs: number;
 }
 
+interface RawTreeNode {
+  id: string;
+  parentId: string | null;
+  depth: number;
+  isTeamworkBranch: boolean;
+  raw: RawSubagentFile;
+  child: ChildConvStatus;
+}
+
 const STALE_NO_PID_MS = 65 * 60_000;
 const HOOK_RACE_GRACE_MS = 5_000;
 const WAKEUP_MID_WINDOW_MS = 90_000;
+const MAX_SUBAGENT_TREE_DEPTH = 5;
+const MAX_SUBAGENT_TREE_NODES = 120;
 
 function defaultIsPidAlive(pid: number): boolean {
   try {
@@ -95,7 +130,7 @@ function defaultIsPidAlive(pid: number): boolean {
   }
 }
 
-function readJsonSafe<T>(filePath: string): T | null {
+export function readJsonSafe<T>(filePath: string): T | null {
   try {
     return JSON.parse(readFileSync(filePath, "utf8")) as T;
   } catch {
@@ -117,16 +152,30 @@ function parseIsoMs(value: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function cleanArg(value: unknown): unknown {
+export function cleanArg(value: unknown): unknown {
   if (typeof value !== "string") return value;
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return value;
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+    trimmed === "true" ||
+    trimmed === "false" ||
+    /^-?\d+(?:\.\d+)?$/.test(trimmed)
+  ) {
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      return value;
+    }
   }
+  if (trimmed.startsWith('"') && !trimmed.endsWith('"')) {
+    return trimmed.slice(1).replace(/\\n/g, " ").replace(/\\"/g, '"');
+  }
+  return value;
 }
 
-function readTranscriptRows(transcriptPath: string): TranscriptRow[] {
+export function readTranscriptRows(transcriptPath: string): TranscriptRow[] {
   let raw = "";
   try {
     raw = readFileSync(transcriptPath, "utf8");
@@ -156,6 +205,112 @@ function readTranscriptRows(transcriptPath: string): TranscriptRow[] {
     }
   }
   return rows;
+}
+
+function truncateLine(text: string, maxLen = 84): string {
+  const single = text.replace(/\s+/g, " ").trim();
+  if (single.length <= maxLen) return single;
+  return `${single.slice(0, maxLen - 1)}…`;
+}
+
+function formatWorkspaceUri(uri: string | undefined): string | null {
+  if (!uri) return null;
+  return uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)) : uri;
+}
+
+export function summarizeToolCall(tc: {
+  name?: string;
+  args?: Record<string, unknown>;
+}): string {
+  const name = tc.name ?? "tool";
+  const args = tc.args ?? {};
+  switch (name) {
+    case "run_command": {
+      const summary = cleanArg(args.toolSummary) ?? cleanArg(args.CommandLine);
+      return summary ? `命令: ${truncateLine(String(summary), 64)}` : "执行命令";
+    }
+    case "read_file": {
+      const p = cleanArg(args.Path);
+      return p ? `读取 ${path.basename(String(p))}` : "读取文件";
+    }
+    case "edit_file":
+    case "write_file": {
+      const p = cleanArg(args.Path);
+      return p
+        ? `${name === "edit_file" ? "编辑" : "写入"} ${path.basename(String(p))}`
+        : name === "edit_file"
+          ? "编辑文件"
+          : "写入文件";
+    }
+    case "post_message": {
+      const txt = cleanArg(args.text);
+      return txt ? `发帖: ${truncateLine(String(txt), 60)}` : "发帖到消息板";
+    }
+    case "read_board": {
+      const since = cleanArg(args.since);
+      return since !== undefined ? `读取消息板 (> #${since})` : "读取消息板";
+    }
+    case "swarm_wait": {
+      const since = cleanArg(args.since);
+      return since !== undefined ? `等待消息板 (> #${since})` : "等待消息板唤醒";
+    }
+    case "swarm": {
+      const action = cleanArg(args.action);
+      const target = cleanArg(args.name);
+      return target ? `swarm ${action}: ${target}` : `swarm ${action ?? ""}`.trim();
+    }
+    case "invoke_subagent": {
+      const role = cleanArg(args.Role) ?? cleanArg(args.TypeName);
+      return role ? `派发子代理: ${truncateLine(String(role), 50)}` : "派发子代理";
+    }
+    case "send_message": {
+      const msg = cleanArg(args.Message);
+      return msg ? `发消息: ${truncateLine(String(msg), 56)}` : "发送消息";
+    }
+    case "run_workflow": {
+      const desc = cleanArg(args.Description);
+      return desc ? `Workflow: ${truncateLine(String(desc), 56)}` : "运行 Workflow";
+    }
+    default:
+      return name;
+  }
+}
+
+function summarizeRecentActivity(rows: TranscriptRow[]): {
+  model: string | null;
+  lastActivity: string | null;
+} {
+  let model: string | null = null;
+  let lastActivity: string | null = null;
+  let fallbackActivity: string | null = null;
+  for (let i = rows.length - 1; i >= Math.max(0, rows.length - 20); i -= 1) {
+    const r = rows[i];
+    if (!model && typeof r.model === "string" && r.model.length > 0) {
+      model = r.model;
+    }
+    if (!lastActivity) {
+      if (r.type === "ERROR_MESSAGE") {
+        lastActivity = `错误: ${truncateLine(r.content ?? "执行失败", 68)}`;
+      } else if (r.type === "PLANNER_RESPONSE") {
+        if (r.tool_calls && r.tool_calls.length > 0) {
+          const substantive = [...r.tool_calls]
+            .reverse()
+            .find((tc) => tc.name !== "swarm_wait" && tc.name !== "read_board");
+          if (substantive) {
+            lastActivity = summarizeToolCall(substantive);
+          } else if (!fallbackActivity) {
+            fallbackActivity = summarizeToolCall(r.tool_calls[r.tool_calls.length - 1]);
+          }
+        } else if (r.content && r.content.trim().length > 0) {
+          lastActivity = truncateLine(r.content, 72);
+        } else if (r.thinking && r.thinking.trim().length > 0 && !fallbackActivity) {
+          fallbackActivity = `思考: ${truncateLine(r.thinking, 64)}`;
+        }
+      }
+    }
+    if (model && lastActivity) break;
+  }
+  return { model, lastActivity: lastActivity ?? fallbackActivity };
 }
 
 function extractOpenBgTasks(
@@ -259,7 +414,10 @@ function hasSystemWakeupAfter(rows: TranscriptRow[], luIndex: number): boolean {
   return false;
 }
 
-function detectGoalActive(rows: TranscriptRow[], bdir: string): boolean {
+function detectGoal(
+  rows: TranscriptRow[],
+  bdir: string,
+): { active: boolean; summary: string | null } {
   let lastGoalUserIdx = -1;
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const r = rows[i];
@@ -271,12 +429,11 @@ function detectGoalActive(rows: TranscriptRow[], bdir: string): boolean {
       }
     }
   }
-  if (lastGoalUserIdx < 0) return false;
+  if (lastGoalUserIdx < 0) return { active: false, summary: null };
 
-  // Verify `/goal is a [Slash Command]` from full log when USER_INPUT was truncated.
+  let userContent = rows[lastGoalUserIdx].content ?? "";
   let confirmed =
-    (rows[lastGoalUserIdx].content ?? "").includes("/goal is a [Slash Command]") ||
-    /(?:^|\n)\s*\/goal\b/.test(rows[lastGoalUserIdx].content ?? "");
+    userContent.includes("/goal is a [Slash Command]") || /(?:^|\n)\s*\/goal\b/.test(userContent);
   if (!confirmed) {
     const fullRows = readTranscriptRows(path.join(bdir, "logs", "transcript_full.jsonl"));
     const targetStep = rows[lastGoalUserIdx].step_index;
@@ -285,21 +442,191 @@ function detectGoalActive(rows: TranscriptRow[], bdir: string): boolean {
         (targetStep !== undefined ? fr.step_index === targetStep : fr.type === "USER_INPUT") &&
         (fr.content ?? "").includes("/goal is a [Slash Command]"),
     );
-    confirmed = Boolean(match);
+    if (match) {
+      confirmed = true;
+      userContent = match.content ?? userContent;
+    }
   }
-  if (!confirmed) return false;
+  if (!confirmed) return { active: false, summary: null };
 
   for (let i = lastGoalUserIdx + 1; i < rows.length; i += 1) {
     const r = rows[i];
     if (r.type === "USER_INPUT") {
       const content = r.content ?? "";
-      if (/(?:^|\n)\s*\/goal\s+(?:clear|stop|cancel|off)\b/i.test(content)) return false;
+      if (/(?:^|\n)\s*\/goal\s+(?:clear|stop|cancel|off)\b/i.test(content)) {
+        return { active: false, summary: null };
+      }
     }
     if (r.type === "PLANNER_RESPONSE" && (r.content ?? "").includes("<!-- GOAL_COMPLETE -->")) {
-      return false;
+      return { active: false, summary: null };
     }
   }
-  return true;
+
+  const m = /\/goal\s+([^\n<]+)/.exec(userContent);
+  const summary = m?.[1]?.trim() ? truncateLine(m[1].trim(), 90) : null;
+  return { active: true, summary };
+}
+
+function detectBoostActive(rows: TranscriptRow[], luIndex: number, allNodes: SubagentItem[]): boolean {
+  if (allNodes.some((n) => n.category === "boost" && n.state === "running")) {
+    return true;
+  }
+  if (luIndex < 0) return false;
+  for (let i = rows.length - 1; i >= Math.max(0, luIndex - 2); i -= 1) {
+    const r = rows[i];
+    if (r.type === "USER_INPUT") {
+      const c = r.content ?? "";
+      if (c.includes("/boost is a [Slash Command]") || /(?:^|\n)\s*\/boost\b/.test(c)) {
+        return true;
+      }
+      break;
+    }
+  }
+  return false;
+}
+
+function extractPlanStatus(rows: TranscriptRow[]): PlanStatus | null {
+  let inPlanMode = false;
+  let steps: PlanStep[] = [];
+  let sawPlanEvent = false;
+  const validStatuses = new Set(["pending", "in_progress", "done", "skipped", "failed"]);
+
+  for (const r of rows) {
+    if (r.type !== "PLANNER_RESPONSE" || !r.tool_calls) continue;
+    for (const tc of r.tool_calls) {
+      if (tc.name === "enter_plan_mode") {
+        inPlanMode = true;
+        sawPlanEvent = true;
+      } else if (tc.name === "exit_plan_mode") {
+        inPlanMode = false;
+        sawPlanEvent = true;
+      } else if (tc.name === "update_steps") {
+        const rawSteps = cleanArg(tc.args?.steps);
+        if (Array.isArray(rawSteps)) {
+          const parsed: PlanStep[] = [];
+          for (const item of rawSteps) {
+            if (!item || typeof item !== "object") continue;
+            const rec = item as Record<string, unknown>;
+            const title = typeof rec.title === "string" ? rec.title.trim() : "";
+            const statusRaw = typeof rec.status === "string" ? rec.status : "pending";
+            if (!title) continue;
+            parsed.push({
+              title,
+              status: (validStatuses.has(statusRaw) ? statusRaw : "pending") as PlanStep["status"],
+            });
+          }
+          if (parsed.length > 0) {
+            steps = parsed;
+            sawPlanEvent = true;
+          }
+        }
+      }
+    }
+  }
+
+  if (!sawPlanEvent) return null;
+  const completed = steps.filter((s) => s.status === "done" || s.status === "skipped").length;
+  return {
+    inPlanMode,
+    completed,
+    total: steps.length,
+    steps,
+  };
+}
+
+function extractWorkflowRuns(rows: TranscriptRow[], runtimeAlive: boolean): WorkflowRun[] {
+  const runs: WorkflowRun[] = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    if (r.type !== "PLANNER_RESPONSE" || !r.tool_calls) continue;
+    for (let tcIdx = 0; tcIdx < r.tool_calls.length; tcIdx += 1) {
+      const tc = r.tool_calls[tcIdx];
+      if (tc.name !== "run_workflow") continue;
+      const desc =
+        String(cleanArg(tc.args?.Description) ?? cleanArg(tc.args?.ScriptPath) ?? "Workflow").slice(
+          0,
+          100,
+        );
+      const id = tc.id ?? `wf-${r.step_index ?? i}-${tcIdx}`;
+      let status: WorkflowRun["status"] = runtimeAlive ? "running" : "completed";
+      const nextGeneric = rows[i + 1 + tcIdx];
+      if (nextGeneric?.type === "GENERIC") {
+        const gc = nextGeneric.content ?? "";
+        if (/error|failed|exception|traceback/i.test(gc) && !/background/i.test(gc)) {
+          status = "failed";
+        } else if (!/running in the background|background task/i.test(gc)) {
+          status = "completed";
+        } else {
+          // Check later SYSTEM_MESSAGE for completion
+          for (let j = i + 2; j < rows.length; j += 1) {
+            if (rows[j].type === "SYSTEM_MESSAGE") {
+              const sc = rows[j].content ?? "";
+              if (/workflow.*(failed|error)/i.test(sc)) {
+                status = "failed";
+                break;
+              }
+              if (/workflow.*(completed|finished|done)/i.test(sc)) {
+                status = "completed";
+                break;
+              }
+            }
+          }
+        }
+      }
+      runs.push({
+        id,
+        description: desc,
+        status,
+        startedAt: parseIsoMs(r.created_at),
+      });
+    }
+  }
+  return runs;
+}
+
+function classifySubagentCategory(typeName: string, role: string): SubagentCategory {
+  const t = typeName.toLowerCase();
+  const r = role.toLowerCase();
+  if (t === "teamwork_victory_auditor" || r.includes("victory auditor")) return "victory_auditor";
+  if (t === "teamwork_interviewer" || r.includes("interviewer")) return "interviewer";
+  if (
+    t === "teamwork" ||
+    t === "teamwork_orchestrator" ||
+    r.includes("orchestrator") ||
+    r.includes("sentinel")
+  ) {
+    return "orchestrator";
+  }
+  if (t === "teamwork_challenger" || r.includes("challenger")) return "challenger";
+  if (t === "teamwork_auditor" || r.includes("auditor")) return "auditor";
+  if (t === "teamwork_reviewer" || r.includes("reviewer") || r.includes("critic")) return "reviewer";
+  if (t === "teamwork_explorer" || r.includes("explorer") || t === "teamwork_spec_miner") {
+    return "explorer";
+  }
+  if (t === "teamwork_worker" || t === "teamwork_test_writer" || t === "worker") return "worker";
+  if (
+    t.includes("boost") ||
+    r.includes("deepcoder") ||
+    r.includes("deepinvestigator") ||
+    r.includes("pipeline coordinator")
+  ) {
+    return "boost";
+  }
+  if (t === "research") return "research";
+  if (t === "self") return "self";
+  return "other";
+}
+
+function isTeamworkDescriptor(typeName: string, role: string): boolean {
+  const t = typeName.toLowerCase();
+  const r = role.toLowerCase();
+  return (
+    t.startsWith("teamwork") ||
+    r.includes("teamwork") ||
+    r.includes("project orchestrator") ||
+    r.includes("victory auditor") ||
+    r.includes("task interviewer")
+  );
 }
 
 function inspectChildConv(brainRoot: string, conversationId: string): ChildConvStatus {
@@ -325,17 +652,141 @@ function inspectChildConv(brainRoot: string, conversationId: string): ChildConvS
   const hsFresh = Boolean(hs?.ts && (!lastTs || hs.ts >= lastTs - 2_000));
   const stopIdle = Boolean(!hasAskQ && hs?.event === "Stop" && hs.fullyIdle === true && hsFresh);
   const stopBusy = Boolean(!hasAskQ && hs?.event === "Stop" && hs.fullyIdle === false && hsFresh);
+  const { model, lastActivity } = summarizeRecentActivity(rows);
 
   return {
     lastType: lr?.type ?? null,
     lastStatus: lr?.status ?? null,
     lastTs,
+    model,
+    lastActivity,
+    stepCount: rows.length,
     hasAskQ,
     stopIdle,
     stopBusy,
     hasOpenTask: openTasks.length > 0,
     freshestMtimeMs: Math.max(readMtimeMs(txPath), readMtimeMs(hsPath), readMtimeMs(procPath)),
   };
+}
+
+function scanSubagentTree(
+  brainRoot: string,
+  rootSessionId: string,
+  swarmConvIds: Set<string>,
+): { nodes: RawTreeNode[]; freshestMtimeMs: number } {
+  const nodes: RawTreeNode[] = [];
+  const visited = new Set<string>([rootSessionId]);
+  let freshestMtimeMs = 0;
+
+  const walk = (parentId: string, depth: number, inheritedTeamwork: boolean) => {
+    if (depth > MAX_SUBAGENT_TREE_DEPTH || nodes.length >= MAX_SUBAGENT_TREE_NODES) return;
+    const subagentsDir = path.join(brainRoot, parentId, ".system_generated", "subagents");
+    let files: string[];
+    try {
+      files = readdirSync(subagentsDir)
+        .filter((f) => f.endsWith(".json"))
+        .sort();
+    } catch {
+      return;
+    }
+
+    for (const file of files) {
+      if (nodes.length >= MAX_SUBAGENT_TREE_NODES) break;
+      const raw = readJsonSafe<RawSubagentFile>(path.join(subagentsDir, file));
+      const cid = raw?.conversationId;
+      if (!cid || visited.has(cid)) continue;
+      if (depth === 0 && swarmConvIds.has(cid)) continue;
+      visited.add(cid);
+
+      const typeName = raw.subagentDescriptor?.typeName ?? "subagent";
+      const role = raw.subagentDescriptor?.role ?? cid.slice(0, 8);
+      const isTeamworkBranch = inheritedTeamwork || isTeamworkDescriptor(typeName, role);
+      const child = inspectChildConv(brainRoot, cid);
+      if (child.freshestMtimeMs > freshestMtimeMs) freshestMtimeMs = child.freshestMtimeMs;
+      if (child.lastTs && child.lastTs > freshestMtimeMs) freshestMtimeMs = child.lastTs;
+
+      nodes.push({
+        id: cid,
+        parentId: depth === 0 ? null : parentId,
+        depth,
+        isTeamworkBranch,
+        raw,
+        child,
+      });
+
+      walk(cid, depth + 1, isTeamworkBranch);
+    }
+  };
+
+  walk(rootSessionId, 0, false);
+  return { nodes, freshestMtimeMs };
+}
+
+function readBoardQuickMeta(boardPath: string): { count: number; latestSeq: number; mtimeMs: number } {
+  const mtimeMs = readMtimeMs(boardPath);
+  if (mtimeMs === 0) return { count: 0, latestSeq: 0, mtimeMs: 0 };
+  try {
+    const raw = readFileSync(boardPath, "utf8");
+    const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+    let latestSeq = lines.length;
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        const obj = JSON.parse(lines[i]) as { seq?: number };
+        if (typeof obj.seq === "number") {
+          latestSeq = obj.seq;
+          break;
+        }
+      } catch {
+        // skip partial line
+      }
+    }
+    return { count: lines.length, latestSeq, mtimeMs };
+  } catch {
+    return { count: 0, latestSeq: 0, mtimeMs };
+  }
+}
+
+function inferTeamworkPhase(nodes: SubagentItem[]): TeamworkPhase {
+  const running = nodes.filter((n) => n.state === "running");
+  if (running.length > 0) {
+    if (running.some((n) => n.category === "victory_auditor")) return "victory_audit";
+    if (
+      running.some(
+        (n) => n.category === "auditor" || n.category === "challenger" || n.category === "reviewer",
+      )
+    ) {
+      return "auditing";
+    }
+    if (running.some((n) => n.category === "interviewer")) return "interview";
+    if (running.some((n) => n.category === "worker" || n.category === "explorer")) {
+      return "executing";
+    }
+    return "planning";
+  }
+  if (nodes.length === 0) return "idle";
+  if (nodes.some((n) => n.state === "failed")) return "failed";
+  return "completed";
+}
+
+function phaseLabelZh(phase: TeamworkPhase): string {
+  switch (phase) {
+    case "interview":
+      return "需求访谈";
+    case "planning":
+      return "里程碑规划";
+    case "executing":
+      return "并行执行";
+    case "auditing":
+      return "门禁审核";
+    case "victory_audit":
+      return "终局验收";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "有失败";
+    case "idle":
+      return "空闲";
+  }
 }
 
 function pickRecordedPid(proc: ProcessStateJson | null, hs: HookStateJson | null): number | null {
@@ -369,11 +820,14 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
   const procPath = path.join(bdir, "logs", "process.json");
   const swarmMembersPath = path.join(bdir, "swarm", "members.json");
   const swarmMetaPath = path.join(bdir, "swarm", "swarm.json");
+  const swarmPlanPath = path.join(bdir, "swarm", "plan.json");
+  const swarmBoardPath = path.join(bdir, "swarm", "board.jsonl");
 
   const rows = readTranscriptRows(txPath);
   const hs = readJsonSafe<HookStateJson>(hsPath);
   const proc = readJsonSafe<ProcessStateJson>(procPath);
   const recordedPid = pickRecordedPid(proc, hs);
+  const boardMeta = readBoardQuickMeta(swarmBoardPath);
 
   const lr = rows.length > 0 ? rows[rows.length - 1] : null;
   const lts = parseIsoMs(lr?.created_at);
@@ -386,11 +840,13 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     readMtimeMs(hsPath),
     readMtimeMs(procPath),
     readMtimeMs(swarmMembersPath),
+    boardMeta.mtimeMs,
   );
 
   // Inspect swarm members.json first (also contributes freshest mtime when no PID exists yet).
   const rawSwarm = readJsonSafe<RawSwarmMembersFile>(swarmMembersPath);
   const rawSwarmMeta = readJsonSafe<{ swarm_id?: string; title?: string }>(swarmMetaPath);
+  const rawSwarmPlan = readJsonSafe<RawSwarmPlanFile>(swarmPlanPath);
   const memberStatuses: Array<{ name: string; raw: RawSwarmMember; child: ChildConvStatus }> = [];
   const swarmConvIds = new Set<string>();
 
@@ -407,6 +863,9 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
             lastType: null,
             lastStatus: null,
             lastTs: null,
+            model: null,
+            lastActivity: null,
+            stepCount: 0,
             hasAskQ: false,
             stopIdle: false,
             stopBusy: false,
@@ -423,26 +882,10 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     }
   }
 
-  // Inspect non-swarm subagents/*.json.
-  const subagentsDir = path.join(bdir, "subagents");
-  const subagentEntries: Array<{ id: string; raw: RawSubagentFile; child: ChildConvStatus }> = [];
-  try {
-    for (const file of readdirSync(subagentsDir)) {
-      if (!file.endsWith(".json")) continue;
-      const d = readJsonSafe<RawSubagentFile>(path.join(subagentsDir, file));
-      const cid = d?.conversationId;
-      if (!cid || swarmConvIds.has(cid)) continue;
-      const child = inspectChildConv(brainRoot, cid);
-      if (child.freshestMtimeMs > freshestActivityMs) {
-        freshestActivityMs = child.freshestMtimeMs;
-      }
-      if (child.lastTs && child.lastTs > freshestActivityMs) {
-        freshestActivityMs = child.lastTs;
-      }
-      subagentEntries.push({ id: cid, raw: d, child });
-    }
-  } catch {
-    // subagents directory absent
+  // Recursively scan non-swarm subagent trees (captures Teamwork 4-level hierarchy, Boost, regular subagents).
+  const scannedTree = scanSubagentTree(brainRoot, sessionId, swarmConvIds);
+  if (scannedTree.freshestMtimeMs > freshestActivityMs) {
+    freshestActivityMs = scannedTree.freshestMtimeMs;
   }
 
   const pidAlive = recordedPid !== null ? isPidAlive(recordedPid) : null;
@@ -474,8 +917,11 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
   const swWait = Boolean(
     !askQ && latestPlanner?.tool_calls?.some((x) => x.name === "swarm_wait"),
   );
-  const goalActive = detectGoalActive(rows, bdir);
+  const goalInfo = detectGoal(rows, bdir);
+  const goalActive = goalInfo.active;
   const tasks = runtimeAlive ? extractOpenBgTasks(rows, lu, sessionId, bdir) : [];
+  const plan = extractPlanStatus(rows);
+  const workflows = extractWorkflowRuns(rows, runtimeAlive);
 
   const members: SwarmMember[] = memberStatuses.map(({ name, raw, child }) => {
     const isKilled = Boolean(
@@ -503,56 +949,130 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     return {
       name,
       conversationId: raw.conversation_id ?? "",
-      model: raw.model ?? null,
+      model: raw.model ?? child.model ?? null,
       state,
       updatedAt: child.lastTs,
+      workspaceMode: raw.workspace_mode ?? null,
+      workspace: raw.workspace ?? null,
+      lastReadSeq: typeof raw.last_read_seq === "number" ? raw.last_read_seq : null,
+      waitSince: typeof raw.wait_since === "number" ? raw.wait_since : null,
+      lastActivity: child.lastActivity,
+      stepCount: child.stepCount,
     };
   });
 
-  const subagents: SubagentItem[] = subagentEntries.map(({ id, raw, child }) => {
-    let state: SubagentItem["state"];
-    if (child.lastType === "ERROR_MESSAGE") {
-      state = "failed";
-    } else if (raw.state === "SUBAGENT_STATE_KILLED") {
-      state = child.stopIdle ? "completed" : "canceled";
-    } else if (
-      !runtimeAlive ||
-      child.stopIdle ||
-      (child.lastType === "PLANNER_RESPONSE" &&
-        child.lastStatus === "DONE" &&
-        !child.stopBusy &&
-        !child.hasOpenTask)
-    ) {
-      state = "completed";
-    } else {
-      state = "running";
+  // First map leaf/node states, then bubble up running state from descendants to ancestor containers
+  const mappedTreeNodes: Array<{ item: SubagentItem; isTeamworkBranch: boolean }> =
+    scannedTree.nodes.map(({ id, parentId, depth, isTeamworkBranch, raw, child }) => {
+      let state: SubagentItem["state"];
+      if (child.lastType === "ERROR_MESSAGE") {
+        state = "failed";
+      } else if (raw.state === "SUBAGENT_STATE_KILLED") {
+        state = child.stopIdle || child.lastStatus === "DONE" ? "completed" : "canceled";
+      } else if (
+        !runtimeAlive ||
+        child.stopIdle ||
+        (child.lastType === "PLANNER_RESPONSE" &&
+          child.lastStatus === "DONE" &&
+          !child.stopBusy &&
+          !child.hasOpenTask)
+      ) {
+        state = "completed";
+      } else {
+        state = "running";
+      }
+      const typeName = raw.subagentDescriptor?.typeName ?? "subagent";
+      const role = raw.subagentDescriptor?.role ?? id.slice(0, 8);
+      return {
+        isTeamworkBranch,
+        item: {
+          id,
+          parentId,
+          depth,
+          role,
+          typeName,
+          category: classifySubagentCategory(typeName, role),
+          state,
+          model: child.model,
+          lastActivity: child.lastActivity,
+          stepCount: child.stepCount,
+          workspace: formatWorkspaceUri(raw.workspaceUris?.[0]),
+          updatedAt: child.lastTs,
+        },
+      };
+    });
+
+  // If any descendant is running while runtime is alive, mark its alive ancestors as running too.
+  if (runtimeAlive) {
+    const byId = new Map(mappedTreeNodes.map((n) => [n.item.id, n.item]));
+    const rawById = new Map(scannedTree.nodes.map((n) => [n.id, n.raw]));
+    for (const entry of mappedTreeNodes) {
+      if (entry.item.state !== "running") continue;
+      let curParentId = entry.item.parentId ?? null;
+      let guard = 0;
+      while (curParentId && guard < MAX_SUBAGENT_TREE_DEPTH + 1) {
+        guard += 1;
+        const parentItem = byId.get(curParentId);
+        const parentRaw = rawById.get(curParentId);
+        if (!parentItem) break;
+        if (parentRaw?.state !== "SUBAGENT_STATE_KILLED" && parentItem.state === "completed") {
+          parentItem.state = "running";
+        }
+        curParentId = parentItem.parentId ?? null;
+      }
     }
-    return {
-      id,
-      role: raw.subagentDescriptor?.role ?? id.slice(0, 8),
-      typeName: raw.subagentDescriptor?.typeName ?? "subagent",
-      state,
-      updatedAt: child.lastTs,
-    };
-  });
+  }
+
+  const teamworkNodes = mappedTreeNodes.filter((n) => n.isTeamworkBranch).map((n) => n.item);
+  const subagents = mappedTreeNodes.filter((n) => !n.isTeamworkBranch).map((n) => n.item);
+
+  const teamworkRunning = teamworkNodes.filter((n) => n.state === "running").length;
+  const teamworkCompleted = teamworkNodes.filter((n) => n.state === "completed").length;
+  const teamworkFailed = teamworkNodes.filter((n) => n.state === "failed").length;
+  const teamwork: TeamworkStatus | null =
+    teamworkNodes.length > 0
+      ? {
+          active: runtimeAlive && teamworkRunning > 0,
+          phase: inferTeamworkPhase(teamworkNodes),
+          totalNodes: teamworkNodes.length,
+          runningNodes: teamworkRunning,
+          completedNodes: teamworkCompleted,
+          failedNodes: teamworkFailed,
+          nodes: teamworkNodes,
+        }
+      : null;
 
   const workingCount = members.filter((m) => m.state === "working").length;
   const waitingCount = members.filter((m) => m.state === "waiting").length;
   const completedCount = members.filter(
     (m) => m.state === "completed" || m.state === "failed" || m.state === "canceled",
   ).length;
+  const planGoal =
+    rawSwarmPlan?.goal?.title || rawSwarmPlan?.goal?.line
+      ? {
+          title: String(rawSwarmPlan.goal.title ?? ""),
+          line: String(rawSwarmPlan.goal.line ?? ""),
+        }
+      : null;
+
   const swarm =
     members.length > 0
       ? {
-          title: rawSwarm?.title ?? rawSwarmMeta?.title ?? null,
+          title: rawSwarm?.title ?? rawSwarmMeta?.title ?? planGoal?.title ?? null,
           working: workingCount,
           waiting: waitingCount,
           completed: completedCount,
+          boardCount: boardMeta.count,
+          latestSeq: boardMeta.latestSeq,
+          planGoal,
           members,
         }
       : null;
 
   const runningSubagents = subagents.filter((s) => s.state === "running").length;
+  const runningWorkflows = workflows.filter((w) => w.status === "running").length;
+  const boostActive = runtimeAlive && detectBoostActive(rows, lu, [...teamworkNodes, ...subagents]);
+
   const hasWakeupMid = Boolean(
     runtimeAlive &&
       !askQ &&
@@ -579,9 +1099,16 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
       swarm !== null &&
       (swarm.working > 0 || (swWait && (swarm.waiting > 0 || hookBusy || recentSwWaitRace))),
   );
+  const teamworkActive = Boolean(teamwork?.active);
   const backgroundActive = Boolean(
     runtimeAlive &&
-      (swarmActive || runningSubagents > 0 || tasks.length > 0 || hookBusy || hasWakeupMid),
+      (swarmActive ||
+        teamworkActive ||
+        runningSubagents > 0 ||
+        runningWorkflows > 0 ||
+        tasks.length > 0 ||
+        hookBusy ||
+        hasWakeupMid),
   );
 
   let coordinatorState: AgentBgStatus["coordinatorState"];
@@ -597,15 +1124,48 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     coordinatorState = "idle";
   }
 
+  const modes: AgyMode[] = [];
+  if (swarm) modes.push("swarm");
+  if (teamwork) modes.push("teamwork");
+  if (boostActive) modes.push("boost");
+  if (workflows.length > 0) modes.push("workflow");
+  if (goalActive) modes.push("goal");
+  if (plan) modes.push("plan");
+  if (subagents.length > 0) modes.push("subagents");
+  if (tasks.length > 0) modes.push("tasks");
+
+  let primaryMode: AgyPrimaryMode = "idle";
+  if (swarmActive) primaryMode = "swarm";
+  else if (teamworkActive) primaryMode = "teamwork";
+  else if (boostActive) primaryMode = "boost";
+  else if (runningWorkflows > 0) primaryMode = "workflow";
+  else if (runningSubagents > 0) primaryMode = "subagents";
+  else if (tasks.length > 0) primaryMode = "tasks";
+  else if (goalActive) primaryMode = "goal";
+  else if (swarm) primaryMode = "swarm";
+  else if (teamwork) primaryMode = "teamwork";
+  else if (workflows.length > 0) primaryMode = "workflow";
+  else if (plan) primaryMode = "plan";
+  else if (subagents.length > 0) primaryMode = "subagents";
+
+  const hasConsoleData = modes.length > 0;
+
   let pillLabel = "";
   if (swarm && swarmActive) {
+    const boardSuffix = boardMeta.latestSeq > 0 ? ` · #${boardMeta.latestSeq}` : "";
     if (swarm.working > 0) {
       pillLabel = `后台运行中 · Swarm ${swarm.working} 运行${
         swarm.waiting > 0 ? ` / ${swarm.waiting} 待命` : ""
-      }`;
+      }${boardSuffix}`;
     } else {
-      pillLabel = `后台等唤醒 · Swarm ${swarm.waiting} 待命`;
+      pillLabel = `后台等唤醒 · Swarm ${swarm.waiting} 待命${boardSuffix}`;
     }
+  } else if (teamwork && teamworkActive) {
+    pillLabel = `Teamwork · ${phaseLabelZh(teamwork.phase)} · ${teamwork.runningNodes}/${teamwork.totalNodes} 运行`;
+  } else if (boostActive) {
+    pillLabel = `Boost 深度推进中${runningSubagents > 0 ? ` · ${runningSubagents} 个子代理` : ""}`;
+  } else if (runningWorkflows > 0) {
+    pillLabel = `Workflow 运行中（${runningWorkflows}）`;
   } else if (runningSubagents > 0) {
     pillLabel = `后台运行中 · ${runningSubagents} 个子代理`;
   } else if (tasks.length > 0) {
@@ -619,10 +1179,16 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     summaryLine = "会话进程已停止或已回收";
   } else if (coordinatorState === "swarm_wait") {
     summaryLine = "主代理在 swarm_wait 挂起等唤醒，worker 发帖后自动继续";
+  } else if (teamwork && teamworkActive) {
+    summaryLine = `Teamwork 正在「${phaseLabelZh(teamwork.phase)}」阶段，${teamwork.runningNodes} 个成员运行中（共 ${teamwork.totalNodes} 节点）`;
+  } else if (boostActive) {
+    summaryLine = "Boost 多轮对抗优化流水线正在运行";
   } else if (coordinatorState === "wakeup_running") {
     summaryLine = "主代理已收到唤醒，正在执行后续步骤";
   } else if (backgroundActive) {
     summaryLine = "Antigravity 仍有后台任务或子代理未收尾";
+  } else if (goalActive) {
+    summaryLine = goalInfo.summary ? `/goal 目标循环中：${goalInfo.summary}` : "/goal 目标循环已开启";
   } else {
     summaryLine = "当前无活动后台任务";
   }
@@ -632,10 +1198,18 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     sessionId,
     backgroundActive,
     goalActive,
+    goalSummary: goalInfo.summary,
+    boostActive,
+    modes,
+    primaryMode,
+    hasConsoleData,
     coordinatorState,
     pillLabel,
     summaryLine,
     swarm,
+    teamwork,
+    plan,
+    workflows,
     subagents,
     tasks,
     observedAt: now,

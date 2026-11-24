@@ -1,33 +1,25 @@
-# antigravity-lifecycle (Paseo plugin)
+# Antigravity Lifecycle & Orchestration Console (`antigravity-lifecycle`)
 
-Integrates Antigravity CLI (`agy`) lifecycle hooks with Paseo and adds a live composer pill (`Antigravity 后台状态`) showing active `swarm` members, `invoke_subagent` runs, background `run_command`/`schedule` tasks, and `/goal` status.
+Integrates Antigravity CLI (`agy`) lifecycle hooks with Paseo, turns opaque `Other` ACP tool calls into structured timeline cards, and provides a live multi-mode orchestration console panel for **Swarm**, **Teamwork**, **Boost**, **`/goal`**, **Plan**, **Workflow**, subagents, and background tasks.
 
-![Antigravity Lifecycle composer pill and popover](assets/pill.png)
+## Features
 
-> 下面是中文说明，内容以中文为准。
+1. **Semantic Timeline Cards (No More `Other`)**
+   - Intercepts `name === "other"` tool calls (`post_message`, `swarm`, `read_board`, `swarm_wait`, `invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents`, `run_workflow`, `update_steps`, `enter_plan_mode`, `exit_plan_mode`, `schedule`, `manage_task`, `ask_question`, and generic custom tools).
+   - Renders compact, theme-aware cards with `@mention` badges, checklist progress, expandable full content, and on-demand message board backfill for `read_board` / `swarm_wait`.
+2. **Live Multi-Mode Console Panel (`agy-console`)**
+   - Open via the composer pill popover, `/swarm-board`, `/agy-board`, command palette, or any Swarm/Teamwork timeline card.
+   - **Overview**: Swarm `plan.json` goals and threads, live member status/model/worktree/unread count/latest substantive activity, Teamwork 5-stage pipeline indicator, `/goal` summary, Plan step checklist, Workflow runs, and background commands/timers.
+   - **Message Board**: Real-time `board.jsonl` feed with `@member` filtering, newest/chronological sorting, screenshot tags, and safe directive dispatch through the coordinator.
+   - **Nested Agent Tree**: Recursive scanning (up to 5 levels) of Teamwork hierarchies (`Teamwork` → `Interviewer` / `Project Orchestrator` → `Sub-orchestrator` → `Explorer` / `Worker` / `Reviewer` / `Challenger` / `Auditor` / `Victory Auditor`) and regular subagents, with deep running state bubbling.
+   - **Child Live Transcript**: Click any Swarm worker or Teamwork/regular subagent to inspect its recent execution steps in real time (auto-refreshes every 3s while running; strictly scoped to children of the current session).
+3. **Lifecycle Hook Integration & Live Composer Pill**
+   - Installs `~/.paseo/agent-hooks/antigravity-hook.mjs` under `~/.gemini/config/hooks.json` (`paseo-status`).
+   - Polls active `antigravity` / `antigravity-cli` / `agy` sessions every 2s, verifying OS PID liveness so terminated sessions clear immediately.
 
-为 Antigravity CLI（`agy`）安装 Paseo 生命周期 hook（`~/.gemini/config/hooks.json` 的 `"paseo-status"` 分组），把 `Stop`（含官方 `fullyIdle: true | false` 与进程 `pid`）写入 `<brainDir>/.system_generated/logs/hook-state.json`、`PreInvocation` / `Stop` 的进程号写入 `process.json`，并在 Paseo 输入框上方提供 `Antigravity 后台状态` 实时胶囊（覆盖原生 `swarm`、`invoke_subagent` 与后台 `run_command` / `schedule`）。
-
-## 为什么需要这个插件
-
-1. `agy acp` 在前台第一轮调用结束时常提前返回 `{ stopReason: "end_turn" }`（含 `swarm_wait` 首次被唤醒、或 `Stop` hook 落盘前 ~1.75s 的竞争窗口），让 Paseo 界面显示为 `idle`。
-2. 本插件服务端每 2s 轮询活动中的 `antigravity` / `antigravity-cli` 会话磁盘状态（并校验证件 `pid` 存活，已退出或已归档会话立即清零），通过 `addComposerPill` 在桌面端、Web 端与手机端实时展示 `后台运行中` 胶囊与成员详情 Popover，**无需重启 Paseo daemon**，热重载即可生效。
-
-## Hook 分组
-
-在不改动 `"orca-status"` 与 `"thread-scope"` 的前提下，在 `~/.gemini/config/hooks.json` 维护独立的 `"paseo-status"` 命名分组：
-
-1. `PreInvocation`：输出 `{}`，记录 `process.json`（不覆盖 `hook-state.json` 的 `Stop` 信号）。
-2. `PostInvocation`：输出 `{}`，不覆写 `Stop` 结果。
-3. `Stop`：输出 `{"decision":""}`，原子写入 `hook-state.json`（`fullyIdle: true | false` + `pid`）与 `process.json`。
-
-## 安装与验收
+## Development & Verification
 
 ```bash
-cd paseo-plugins/antigravity-lifecycle
-npm install
-npm run typecheck
 npm test
-paseo plugin reload antigravity-lifecycle
-paseo plugin ls                   # 要求 antigravity-lifecycle = running
+npm run typecheck
 ```

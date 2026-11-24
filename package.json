@@ -1,8 +1,9 @@
 {
   "name": "paseo-antigravity-lifecycle",
+  "private": true,
   "type": "module",
-  "version": "0.2.0",
-  "description": "Antigravity CLI (agy) lifecycle hook integration and live background/swarm composer pill for Paseo.",
+  "version": "0.3.0",
+  "description": "Antigravity CLI (agy) full-mode orchestration console (Swarm, Teamwork, Boost, Goal, Plan, Workflow), timeline cards, and lifecycle hooks for Paseo.",
   "files": [
     "paseo-plugin.json",
     "OVERVIEW.md",
@@ -12,17 +13,16 @@
     "index.client.tsx",
     "server/",
     "client/",
-    "shared/",
-    "LICENSE"
+    "shared/"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test server/*.test.ts"
+    "test": "node --test server/*.test.ts client/*.test.ts"
   },
   "devDependencies": {
-    "@getpaseo/client": "^0.16.0",
-    "@getpaseo/plugin": "^0.16.0",
-    "@getpaseo/protocol": "^0.16.0",
+    "@getpaseo/client": "^0.17.0",
+    "@getpaseo/plugin": "^0.17.0",
+    "@getpaseo/protocol": "^0.17.0",
     "@types/node": "^24.0.0",
     "@types/react": "~19.2.0",
     "react": "19.1.0",
