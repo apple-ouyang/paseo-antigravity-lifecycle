@@ -58,10 +58,12 @@ function AgyQuestionCard({
   agentId,
   data,
   theme,
+  timeLabel,
 }: {
   agentId: string;
   data: AgyToolCardData;
   theme: PluginTheme;
+  timeLabel: string | null;
 }) {
   const paseo = usePaseo();
   const questions = data.questions ?? [];
@@ -203,6 +205,11 @@ function AgyQuestionCard({
               {collapsed ? "展开" : "收起"}
             </Text>
           </Pressable>
+          {timeLabel ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10, fontFamily: "monospace" }}>
+              {timeLabel}
+            </Text>
+          ) : null}
         </View>
       </View>
 
@@ -473,8 +480,10 @@ export function AgyToolCard({
   agentId,
   item,
   theme,
+  timestamp,
 }: PluginTimelineItemProps<AgyToolCardData>) {
   const data = item.data;
+  const timeLabel = formatLocalTimestamp(timestamp);
   const [expanded, setExpanded] = useState(false);
   const [boardPosts, setBoardPosts] = useState<SwarmBoardPost[] | null>(null);
   const [boardLoading, setBoardLoading] = useState(false);
@@ -576,7 +585,7 @@ export function AgyToolCard({
     };
   }, [agentId, data]);
   if (data.category === "question" && data.questions && data.questions.length > 0) {
-    return <AgyQuestionCard agentId={agentId} data={data} theme={theme} />;
+    return <AgyQuestionCard agentId={agentId} data={data} theme={theme} timeLabel={timeLabel} />;
   }
 
   // Checklist rendering for update_steps
@@ -600,11 +609,18 @@ export function AgyToolCard({
               {data.headline}
             </Text>
           </View>
-          <Pressable onPress={() => setExpanded((v) => !v)}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-              {expanded ? "收起" : "展开"}
-            </Text>
-          </Pressable>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Pressable onPress={() => setExpanded((v) => !v)}>
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                {expanded ? "收起" : "展开"}
+              </Text>
+            </Pressable>
+            {timeLabel ? (
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10, fontFamily: "monospace" }}>
+                {timeLabel}
+              </Text>
+            ) : null}
+          </View>
         </View>
         {expanded ? (
           <View style={{ gap: 4, paddingTop: 2 }}>
@@ -694,6 +710,11 @@ export function AgyToolCard({
                 {consoleAction.label}
               </Text>
             </Pressable>
+          ) : null}
+          {timeLabel ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10, fontFamily: "monospace" }}>
+              {timeLabel}
+            </Text>
           ) : null}
         </View>
       </View>

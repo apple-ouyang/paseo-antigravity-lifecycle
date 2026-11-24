@@ -161,7 +161,10 @@ test("formatLocalTimestamp converts UTC ISO strings to local time and preserves 
   const expectedOtherDay = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${expectedSameDay}`;
 
   assert.equal(formatLocalTimestamp(sample, d.getTime() + 60_000), expectedSameDay);
+  assert.equal(formatLocalTimestamp(d, d.getTime() + 60_000), expectedSameDay);
+  assert.equal(formatLocalTimestamp(d.getTime(), d.getTime() + 60_000), expectedSameDay);
   assert.equal(formatLocalTimestamp(sample, d.getTime() + 2 * 86_400_000), expectedOtherDay);
+  assert.equal(formatLocalTimestamp(d, d.getTime() + 2 * 86_400_000), expectedOtherDay);
   assert.equal(formatLocalTimestamp("2026-11-24 20:03:33"), "2026-11-24 20:03:33");
   assert.equal(formatLocalTimestamp(null), null);
 });
