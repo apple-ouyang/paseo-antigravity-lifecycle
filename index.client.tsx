@@ -122,7 +122,7 @@ export default function contribute(client: PluginClientContext) {
     client.openPanel(AGY_CONSOLE_PANEL_ID, {
       workspaceId,
       agentId,
-      location: "explorer",
+      location: "workspace",
     });
   };
   setOpenConsoleHandler(openConsole);
@@ -153,32 +153,32 @@ export default function contribute(client: PluginClientContext) {
   // 3. Slash commands (/swarm-board, /agy-board) and Command Center entry
   const disposeSwarmSlash = client.addSlashCommand({
     name: "swarm-board",
-    description: "在侧栏打开 Antigravity Swarm / Teamwork 实时控制台面板",
+    description: "打开 Antigravity Swarm / Teamwork 实时控制台面板",
     argumentHint: "",
     context: "agent",
     onSubmit({ openPanel }) {
-      openPanel(AGY_CONSOLE_PANEL_ID, { location: "explorer" });
+      openPanel(AGY_CONSOLE_PANEL_ID, { location: "workspace" });
     },
   });
 
   const disposeAgySlash = client.addSlashCommand({
     name: "agy-board",
-    description: "在侧栏打开 Antigravity 全模式控制台（Swarm / Teamwork / Boost / Goal / Plan）",
+    description: "打开 Antigravity 全模式控制台（Swarm / Teamwork / Boost / Goal / Plan）",
     argumentHint: "",
     context: "agent",
     onSubmit({ openPanel }) {
-      openPanel(AGY_CONSOLE_PANEL_ID, { location: "explorer" });
+      openPanel(AGY_CONSOLE_PANEL_ID, { location: "workspace" });
     },
   });
 
   const disposeCommandCenter = client.addCommandCenterItem({
     id: "open-agy-console",
-    title: "在侧栏打开 Antigravity 控制台 (Swarm / Teamwork)",
+    title: "打开 Antigravity 控制台 (Swarm / Teamwork)",
     icon: "Layers",
     keywords: ["swarm", "board", "teamwork", "boost", "goal", "antigravity", "agy"],
     context: "agent",
     onSelect({ openPanel }) {
-      openPanel(AGY_CONSOLE_PANEL_ID, { location: "explorer" });
+      openPanel(AGY_CONSOLE_PANEL_ID, { location: "workspace" });
     },
   });
 

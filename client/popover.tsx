@@ -133,7 +133,7 @@ function StatusContent({
           }}
         >
           <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
-            侧栏详情 →
+            打开控制台 →
           </Text>
         </Pressable>
       </View>
@@ -382,7 +382,7 @@ export function AgyLifecyclePopover(props: PluginButtonContentProps) {
         </Text>
         <Pressable onPress={handleOpenConsole}>
           <Text style={{ color: props.theme.colors.accent, fontSize: 12, fontWeight: "600" }}>
-            在侧栏打开控制台 →
+            打开控制台 →
           </Text>
         </Pressable>
       </View>
