@@ -51,6 +51,19 @@ const navListeners = new Set<() => void>();
 
 const childTranscriptCache = new Map<string, ChildTranscriptCacheEntry>();
 const consoleDetailCache = new Map<string, { detail: AgyConsoleDetail; updatedAt: number }>();
+const submittedQuestionAnswers = new Map<string, string>();
+
+export function getSubmittedQuestionAnswer(key: string): string | null {
+  return submittedQuestionAnswers.get(key) ?? null;
+}
+
+export function setSubmittedQuestionAnswer(key: string, answer: string): void {
+  submittedQuestionAnswers.set(key, answer);
+  if (submittedQuestionAnswers.size > 120) {
+    const first = submittedQuestionAnswers.keys().next().value;
+    if (first) submittedQuestionAnswers.delete(first);
+  }
+}
 
 function notifyNavListeners(): void {
   for (const listener of navListeners) {

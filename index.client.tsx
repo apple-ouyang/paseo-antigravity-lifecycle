@@ -17,7 +17,10 @@ import {
 } from "./client/store.ts";
 import { AgyToolCard } from "./client/timeline-card.tsx";
 import { formatDurationShort } from "./client/progress-bar.tsx";
-import { transformAgyOtherToolCall } from "./client/timeline-transformer.ts";
+import {
+  transformAgyOtherToolCall,
+  transformAgyQuestionFallback,
+} from "./client/timeline-transformer.ts";
 import { agyLifecycleWatch, type AgentBgStatus } from "./shared/rpc.ts";
 import { AgyToolCardSchema } from "./shared/timeline.ts";
 
@@ -136,11 +139,17 @@ export default function contribute(client: PluginClientContext) {
     Component: AgyConsolePanel,
   });
 
-  // 2. Timeline transformer + renderer to replace opaque `Other` tool calls with rich semantic cards
+  // 2. Timeline transformers + renderer to replace opaque `Other` tool calls with rich semantic cards
   const disposeTransformer = client.addTimelineTransformer({
     id: "agy-other-tools",
     query: { itemType: "tool_call" },
     transform: transformAgyOtherToolCall,
+  });
+
+  const disposeQuestionFallback = client.addTimelineTransformer({
+    id: "agy-question-fallback",
+    query: { itemType: "assistant_message" },
+    transform: transformAgyQuestionFallback,
   });
 
   const disposeRenderer = client.addTimelineRenderer({
@@ -276,6 +285,7 @@ export default function contribute(client: PluginClientContext) {
     clearAllStatuses();
     await disposePanel?.();
     await disposeTransformer?.();
+    await disposeQuestionFallback?.();
     await disposeRenderer?.();
     await disposeSwarmSlash?.();
     await disposeAgySlash?.();

@@ -17,7 +17,14 @@ export const AgyToolCategorySchema = z.enum([
   "generic",
 ]);
 
+export const AgyQuestionItemSchema = z.object({
+  question: z.string(),
+  options: z.array(z.string()),
+  isMultiSelect: z.boolean(),
+});
+
 export const AgyToolCardSchema = z.object({
+  callId: z.string().optional(),
   toolKey: z.string(),
   category: AgyToolCategorySchema,
   status: z.enum(["running", "completed", "failed", "canceled"]),
@@ -36,8 +43,11 @@ export const AgyToolCardSchema = z.object({
       }),
     )
     .nullable(),
+  questions: z.array(AgyQuestionItemSchema).nullable().optional(),
+  questionAnswer: z.string().nullable().optional(),
   canOpenConsole: z.boolean(),
 });
 
 export type AgyToolCategory = z.infer<typeof AgyToolCategorySchema>;
+export type AgyQuestionItem = z.infer<typeof AgyQuestionItemSchema>;
 export type AgyToolCardData = z.infer<typeof AgyToolCardSchema>;
