@@ -44,6 +44,7 @@ import {
   setConsoleDetailCache,
   subscribeConsoleNav,
   subscribeStatus,
+  upsertAgentStatus,
   type ConsoleNavTarget,
   type SelectedChildTarget,
 } from "./store.ts";
@@ -981,6 +982,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
       const next = await fetchConsole({ agentId, boardLimit: 200 });
       if (next) {
         setConsoleDetailCache(agentId, next);
+        upsertAgentStatus(agentId, next.status);
       }
       setDetail(next);
     } catch {
@@ -991,7 +993,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
   }, [agentId, fetchConsole]);
 
   const statusFingerprint = liveStatus
-    ? `${liveStatus.observedAt}:${liveStatus.swarm?.latestSeq ?? 0}:${liveStatus.swarm?.working ?? 0}:${liveStatus.teamwork?.runningNodes ?? 0}:${liveStatus.subagents.length}`
+    ? `${liveStatus.swarm?.title ?? ""}:${liveStatus.swarm?.latestSeq ?? 0}:${liveStatus.swarm?.working ?? 0}:${liveStatus.swarm?.waiting ?? 0}:${liveStatus.swarm?.completed ?? 0}:${liveStatus.swarm?.members.length ?? 0}:${liveStatus.progress?.completed ?? 0}/${liveStatus.progress?.total ?? 0}:${liveStatus.plan?.completed ?? 0}/${liveStatus.plan?.total ?? 0}:${liveStatus.teamwork?.runningNodes ?? 0}/${liveStatus.teamwork?.completedNodes ?? 0}:${liveStatus.subagents.length}:${liveStatus.tasks.length}`
     : "none";
 
   useEffect(() => {

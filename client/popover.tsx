@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
@@ -7,6 +7,7 @@ import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
 import {
   getStatusSnapshot,
   openConsoleForAgent,
+  refreshAgentStatus,
   subscribeStatus,
   type SelectedChildTarget,
 } from "./store.ts";
@@ -449,6 +450,17 @@ export function AgyLifecyclePopover(props: PluginButtonContentProps) {
     () => (agentId ? getStatusSnapshot(agentId) : null),
     () => null,
   );
+
+  // Always self-heal with a fresh RPC read when the popover opens and while it stays open,
+  // so resumed windows or post-reconnect sessions never stay frozen on stale watch snapshots.
+  useEffect(() => {
+    if (!agentId) return;
+    void refreshAgentStatus(agentId);
+    const timer = setInterval(() => {
+      void refreshAgentStatus(agentId);
+    }, 3_000);
+    return () => clearInterval(timer);
+  }, [agentId]);
 
   if (!agentId) return null;
 

@@ -13,7 +13,10 @@ import {
   registerAgentWorkspace,
   replaceAllStatuses,
   setOpenConsoleHandler,
+  setRefreshAgentStatusHandler,
+  subscribeStatus,
   unregisterAgentWorkspace,
+  upsertAgentStatus,
 } from "./client/store.ts";
 import { AgyToolCard } from "./client/timeline-card.tsx";
 import { formatDurationShort } from "./client/progress-bar.tsx";
@@ -21,7 +24,7 @@ import {
   transformAgyOtherToolCall,
   transformAgyQuestionFallback,
 } from "./client/timeline-transformer.ts";
-import { agyLifecycleWatch, type AgentBgStatus } from "./shared/rpc.ts";
+import { agyLifecycleGet, agyLifecycleWatch, type AgentBgStatus } from "./shared/rpc.ts";
 import { AgyToolCardSchema } from "./shared/timeline.ts";
 
 interface PillEntry {
@@ -119,7 +122,13 @@ export default function contribute(client: PluginClientContext) {
   let disposed = false;
   let agentSub: { release(): Promise<void> } | null = null;
   let watchSub: PluginSubscriptionHandle | null = null;
+  let watchActive = false;
+  let watchGeneration = 0;
+  let watchRetryMs = 1_000;
+  let watchRetryTimer: ReturnType<typeof setTimeout> | null = null;
   const pills = new Map<string, PillEntry>();
+  const inFlightRefresh = new Map<string, Promise<AgentBgStatus | null>>();
+  const lastRefreshAt = new Map<string, number>();
 
   const openConsole = (agentId: string, workspaceId: string) => {
     client.openPanel(AGY_CONSOLE_PANEL_ID, {
@@ -194,6 +203,7 @@ export default function contribute(client: PluginClientContext) {
   const remove = (agentId: string) => {
     pills.get(agentId)?.handle.remove();
     pills.delete(agentId);
+    lastRefreshAt.delete(agentId);
     unregisterAgentWorkspace(agentId);
   };
 
@@ -206,7 +216,94 @@ export default function contribute(client: PluginClientContext) {
     entry.handle.update({ visible: nextVisible, label: nextLabel });
   };
 
-  const upsert = (agent: PaseoAgent) => {
+  const syncAllPills = () => {
+    for (const [agentId, entry] of pills) {
+      syncPill(agentId, entry);
+    }
+  };
+
+  const unsubStatusPills = subscribeStatus(syncAllPills);
+
+  const refreshAgent = (
+    agentId: string,
+    options?: { minIntervalMs?: number },
+  ): Promise<AgentBgStatus | null> => {
+    if (disposed || !agentId) return Promise.resolve(null);
+    const existing = inFlightRefresh.get(agentId);
+    if (existing) return existing;
+    const minIntervalMs = options?.minIntervalMs ?? 0;
+    const now = Date.now();
+    if (minIntervalMs > 0 && now - (lastRefreshAt.get(agentId) ?? 0) < minIntervalMs) {
+      return Promise.resolve(getStatusSnapshot(agentId));
+    }
+    lastRefreshAt.set(agentId, now);
+    const req = client
+      .rpc(agyLifecycleGet, { agentId })
+      .then((next) => {
+        if (!disposed) {
+          upsertAgentStatus(agentId, next);
+        }
+        return next;
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (inFlightRefresh.get(agentId) === req) {
+          inFlightRefresh.delete(agentId);
+        }
+      });
+    inFlightRefresh.set(agentId, req);
+    return req;
+  };
+  setRefreshAgentStatusHandler((agentId) => refreshAgent(agentId));
+
+  const startWatch = () => {
+    if (disposed) return;
+    if (watchRetryTimer) {
+      clearTimeout(watchRetryTimer);
+      watchRetryTimer = null;
+    }
+    const prev = watchSub;
+    watchSub = null;
+    if (prev) {
+      void prev.release().catch(() => undefined);
+    }
+    const gen = ++watchGeneration;
+    watchActive = true;
+    try {
+      watchSub = client.subscribe(
+        agyLifecycleWatch,
+        {},
+        (event) => {
+          if (disposed || gen !== watchGeneration) return;
+          watchRetryMs = 1_000;
+          replaceAllStatuses(event.agents);
+        },
+        {
+          onClosed: () => {
+            if (disposed || gen !== watchGeneration) return;
+            watchActive = false;
+            watchSub = null;
+            const delay = watchRetryMs;
+            watchRetryMs = Math.min(watchRetryMs * 2, 15_000);
+            watchRetryTimer = setTimeout(() => {
+              watchRetryTimer = null;
+              startWatch();
+            }, delay);
+          },
+        },
+      );
+    } catch {
+      watchActive = false;
+      const delay = watchRetryMs;
+      watchRetryMs = Math.min(watchRetryMs * 2, 15_000);
+      watchRetryTimer = setTimeout(() => {
+        watchRetryTimer = null;
+        startWatch();
+      }, delay);
+    }
+  };
+
+  const upsert = (agent: PaseoAgent, options?: { fromUpdate?: boolean }) => {
     if (disposed) return;
     const workspaceId = agent.workspaceId;
     if (
@@ -222,6 +319,9 @@ export default function contribute(client: PluginClientContext) {
     const existing = pills.get(agent.id);
     if (existing && existing.workspaceId === workspaceId) {
       syncPill(agent.id, existing);
+      if (options?.fromUpdate || !watchActive) {
+        void refreshAgent(agent.id, { minIntervalMs: 1_500 });
+      }
       return;
     }
     remove(agent.id);
@@ -242,15 +342,11 @@ export default function contribute(client: PluginClientContext) {
       },
     });
     pills.set(agent.id, { workspaceId, handle, visible, label });
+    // Fetch fresh status right away for newly created / resumed old windows so they never display stale cache.
+    void refreshAgent(agent.id, { minIntervalMs: 500 });
   };
 
-  watchSub = client.subscribe(agyLifecycleWatch, {}, (event) => {
-    if (disposed) return;
-    replaceAllStatuses(event.agents);
-    for (const [agentId, entry] of pills) {
-      syncPill(agentId, entry);
-    }
-  });
+  startWatch();
 
   void (async () => {
     try {
@@ -261,14 +357,40 @@ export default function contribute(client: PluginClientContext) {
       }
       agentSub = directory.subscription ?? null;
       for (const { agent } of directory.entries) upsert(agent);
+      // Fetch extra pages if a user has >200 non-archived agents so older active windows still get pills.
+      let cursor = directory.pageInfo?.nextCursor ?? undefined;
+      for (let page = 1; cursor && page < 5 && !disposed; page += 1) {
+        try {
+          const extra = await client.paseo.agents.list({
+            sort: [{ key: "created_at", direction: "desc" }],
+            page: { limit: 200, cursor },
+          });
+          if (disposed) break;
+          for (const { agent } of extra.entries) upsert(agent);
+          const nextCursor = extra.pageInfo?.nextCursor ?? undefined;
+          if (!nextCursor || nextCursor === cursor) break;
+          cursor = nextCursor;
+        } catch {
+          break;
+        }
+      }
       directory.subscription?.subscribe({
         snapshot: ({ entries }) => {
-          if (!disposed) for (const { agent } of entries) upsert(agent);
+          if (disposed) return;
+          for (const { agent } of entries) upsert(agent);
+          // Re-establish watch immediately after a reconnect snapshot if the previous stream closed.
+          if (!watchActive) {
+            watchRetryMs = 1_000;
+            startWatch();
+          }
+          for (const agentId of pills.keys()) {
+            void refreshAgent(agentId, { minIntervalMs: 1_500 });
+          }
         },
         update: (message) => {
           if (disposed || message.type !== "agent_update") return;
           const update = message.payload;
-          if (update.kind === "upsert") upsert(update.agent);
+          if (update.kind === "upsert") upsert(update.agent, { fromUpdate: true });
           else remove(update.agentId);
         },
         error: (error) => console.error("antigravity-lifecycle: agent catalog error", error),
@@ -280,7 +402,17 @@ export default function contribute(client: PluginClientContext) {
 
   return async () => {
     disposed = true;
+    watchGeneration += 1;
+    watchActive = false;
+    if (watchRetryTimer) {
+      clearTimeout(watchRetryTimer);
+      watchRetryTimer = null;
+    }
+    inFlightRefresh.clear();
+    lastRefreshAt.clear();
+    unsubStatusPills();
     setOpenConsoleHandler(null);
+    setRefreshAgentStatusHandler(null);
     for (const agentId of [...pills.keys()]) remove(agentId);
     clearAllStatuses();
     await disposePanel?.();

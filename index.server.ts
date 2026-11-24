@@ -24,6 +24,7 @@ import {
 
 const WATCH_POLL_MS = 2_000;
 const REFRESH_COOLDOWN_MS = 10_000;
+const MAX_AGENT_LIST_PAGES = 5;
 
 function isAgyProvider(provider: string | null | undefined): boolean {
   return provider === "antigravity" || provider === "antigravity-cli" || provider === "agy";
@@ -88,8 +89,12 @@ async function resolveAgentAndSession(
 ): Promise<ResolvedSession | null> {
   const handle = paseo.agents.ref(agentId);
   let agent = handle.current();
+  const needsRefresh =
+    !agent ||
+    agent.status === "closed" ||
+    (!agent.runtimeInfo?.sessionId && !agent.persistence?.sessionId);
 
-  if (!agent) {
+  if (needsRefresh) {
     // Share any in-flight refresh promise so concurrent RPCs (e.g. console.get + child.transcript)
     // never race past each other and return null before handle.refresh() settles.
     const existingFlight = inFlightRefresh.get(agentId);
@@ -134,15 +139,38 @@ async function resolveAgentAndSession(
   return null;
 }
 
+async function listNonArchivedAgents(paseo: PaseoApi): Promise<PaseoAgent[]> {
+  const agents: PaseoAgent[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+
+  for (let page = 0; page < MAX_AGENT_LIST_PAGES; page += 1) {
+    const list = await paseo.agents.list({
+      sort: [{ key: "created_at", direction: "desc" }],
+      page: { limit: 200, ...(cursor ? { cursor } : {}) },
+    });
+    for (const { agent } of list.entries) {
+      if (seen.has(agent.id)) continue;
+      seen.add(agent.id);
+      agents.push(agent);
+    }
+    const nextCursor = list.pageInfo?.nextCursor ?? undefined;
+    if (!nextCursor || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return agents;
+}
+
 async function collectActiveAgyAgents(
   paseo: PaseoApi,
   refreshedAt: Map<string, number>,
   knownSessions: Map<string, ResolvedSession>,
 ): Promise<Record<string, AgentBgStatus>> {
   const result: Record<string, AgentBgStatus> = {};
-  const list = await paseo.agents.list({ page: { limit: 200 } });
+  const agents = await listNonArchivedAgents(paseo);
   const now = Date.now();
-  for (const { agent } of list.entries) {
+  for (const agent of agents) {
     if (!isAgyProvider(agent.provider)) continue;
     if (agent.archivedAt || agent.status === "closed") continue;
     const sessionId = await resolveSessionId(paseo, agent, refreshedAt);
@@ -187,6 +215,8 @@ export default function contribute(server: PluginServerContext) {
     if (!isAgyProvider(event.agent.provider)) {
       return;
     }
+    // Clear refresh cooldown so newly resumed agents pick up fresh status immediately.
+    refreshedAt.delete(event.agent.id);
     try {
       ensureAntigravityHooksInstalled();
     } catch (error) {
@@ -309,8 +339,8 @@ export default function contribute(server: PluginServerContext) {
           const agents = await collectActiveAgyAgents(context.paseo, refreshedAt, knownSessions);
           const hash = stableSignature(agents);
           if (!context.signal.aborted && hash !== lastHash) {
-            lastHash = hash;
             await context.push({ agents });
+            lastHash = hash;
           }
         } catch (error) {
           console.error(

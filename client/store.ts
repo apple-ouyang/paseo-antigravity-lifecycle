@@ -92,6 +92,7 @@ const MAX_CONSOLE_CACHE = 30;
 let statuses: Record<string, AgentBgStatus> = {};
 const agentWorkspaces = new Map<string, string>();
 let openPanelCallback: ((agentId: string, workspaceId: string) => void) | null = null;
+let refreshAgentStatusCallback: ((agentId: string) => Promise<AgentBgStatus | null>) | null = null;
 const listeners = new Set<() => void>();
 
 let navSeq = 0;
@@ -208,6 +209,36 @@ export function replaceAllStatuses(next: Record<string, AgentBgStatus>): void {
   statuses = next;
   for (const listener of listeners) {
     listener();
+  }
+}
+
+export function upsertAgentStatus(agentId: string, next: AgentBgStatus | null): void {
+  if (!agentId) return;
+  if (next === null) {
+    if (!(agentId in statuses)) return;
+    const copy = { ...statuses };
+    delete copy[agentId];
+    statuses = copy;
+  } else {
+    statuses = { ...statuses, [agentId]: next };
+  }
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+export function setRefreshAgentStatusHandler(
+  handler: ((agentId: string) => Promise<AgentBgStatus | null>) | null,
+): void {
+  refreshAgentStatusCallback = handler;
+}
+
+export async function refreshAgentStatus(agentId: string): Promise<AgentBgStatus | null> {
+  if (!agentId || !refreshAgentStatusCallback) return null;
+  try {
+    return await refreshAgentStatusCallback(agentId);
+  } catch {
+    return null;
   }
 }
 

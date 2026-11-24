@@ -7,13 +7,19 @@ import {
   formatLocalTimestamp,
   getChildTranscriptCache,
   getConsoleNavRequest,
+  getStatusSnapshot,
   openConsoleForAgent,
+  refreshAgentStatus,
   registerAgentWorkspace,
+  replaceAllStatuses,
   resolveMemberChildFromStatus,
   resolveSubagentChildFromStatus,
   setOpenConsoleHandler,
+  setRefreshAgentStatusHandler,
   subscribeConsoleNav,
+  subscribeStatus,
   unregisterAgentWorkspace,
+  upsertAgentStatus,
 } from "./store.ts";
 
 test("openConsoleForAgent records and notifies child navigation target for cold and hot console switches", () => {
@@ -210,4 +216,64 @@ test("resolveMemberChildFromStatus and resolveSubagentChildFromStatus resolve di
 
   const subById = resolveSubagentChildFromStatus(status, { id: "sub-1234" });
   assert.equal(subById?.conversationId, "sub-12345678");
+});
+
+test("upsertAgentStatus and refreshAgentStatus heal stale snapshots without clobbering sibling agents", async () => {
+  clearAllStatuses();
+  let notifications = 0;
+  const unsub = subscribeStatus(() => {
+    notifications += 1;
+  });
+
+  const makeStatus = (agentId: string, title: string, working: number) => ({
+    agentId,
+    sessionId: `sess-${agentId}`,
+    backgroundActive: working > 0,
+    goalActive: false,
+    coordinatorState: working > 0 ? ("swarm_wait" as const) : ("idle" as const),
+    pillLabel: working > 0 ? `Swarm ${working} 运行` : "Swarm ✓",
+    summaryLine: title,
+    swarm: {
+      title,
+      working,
+      waiting: 0,
+      completed: working > 0 ? 14 : 14,
+      members: [],
+    },
+    subagents: [],
+    tasks: [],
+    observedAt: Date.now(),
+  });
+
+  try {
+    replaceAllStatuses({
+      a1: makeStatus("a1", "Old Wave", 0),
+      a2: makeStatus("a2", "Other Window", 2),
+    });
+    assert.equal(getStatusSnapshot("a1")?.swarm?.title, "Old Wave");
+    assert.equal(getStatusSnapshot("a2")?.swarm?.title, "Other Window");
+    const beforeUpsert = notifications;
+
+    setRefreshAgentStatusHandler(async (agentId) => {
+      const fresh = makeStatus(agentId, "New Audit Wave", 4);
+      upsertAgentStatus(agentId, fresh);
+      return fresh;
+    });
+
+    const refreshed = await refreshAgentStatus("a1");
+    assert.equal(refreshed?.swarm?.title, "New Audit Wave");
+    assert.equal(getStatusSnapshot("a1")?.swarm?.title, "New Audit Wave");
+    assert.equal(getStatusSnapshot("a1")?.swarm?.working, 4);
+    assert.equal(getStatusSnapshot("a2")?.swarm?.title, "Other Window");
+    assert.ok(notifications > beforeUpsert);
+
+    // Clearing a single agent removes only that agent
+    upsertAgentStatus("a1", null);
+    assert.equal(getStatusSnapshot("a1"), null);
+    assert.equal(getStatusSnapshot("a2")?.swarm?.title, "Other Window");
+  } finally {
+    unsub();
+    setRefreshAgentStatusHandler(null);
+    clearAllStatuses();
+  }
 });
