@@ -63,6 +63,7 @@ interface RawSwarmMember {
   role?: string;
   desired_state?: string;
   phase?: string;
+  wake_mode?: string;
   workspace_mode?: string;
   workspace?: string;
   wait_since?: number;
@@ -107,6 +108,7 @@ interface ChildConvStatus {
   lastActivity: string | null;
   stepCount: number;
   stepProgress: StepProgress | null;
+  turnEnded: boolean | null;
   hasAskQ: boolean;
   stopIdle: boolean;
   stopBusy: boolean;
@@ -637,6 +639,34 @@ function isTeamworkDescriptor(typeName: string, role: string): boolean {
   );
 }
 
+/**
+ * Mirrors official Antigravity swarm_board `turnEnded(lines)`:
+ * A member's turn has ended (idle/waiting) ONLY when the newest transcript step is:
+ *  - a completed PLANNER_RESPONSE with no tool calls, OR
+ *  - tool results (GENERIC) for a PLANNER_RESPONSE batch that included `swarm_wait`
+ *    once `swarm_wait`'s own result is DONE.
+ * Any newer SYSTEM_MESSAGE (board wakeup / background task completion), USER_INPUT,
+ * or non-wait tool result batch means the model is actively mid-turn (working).
+ */
+function isTranscriptTurnEnded(rows: TranscriptRow[]): boolean | null {
+  if (rows.length === 0) return null;
+  const results: TranscriptRow[] = [];
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const step = rows[i];
+    if (step.type === "GENERIC") {
+      results.unshift(step);
+      continue;
+    }
+    if (step.type !== "PLANNER_RESPONSE") return false;
+    if (step.status && step.status !== "DONE") return false;
+    const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
+    if (calls.length === 0) return results.length === 0;
+    const waitIdx = calls.findIndex((c) => c?.name === "swarm_wait");
+    return waitIdx >= 0 && results.length >= calls.length && results[waitIdx]?.status === "DONE";
+  }
+  return false;
+}
+
 function inspectChildConv(brainRoot: string, conversationId: string): ChildConvStatus {
   const cbdir = path.join(brainRoot, conversationId, ".system_generated");
   const txPath = path.join(cbdir, "logs", "transcript.jsonl");
@@ -668,6 +698,7 @@ function inspectChildConv(brainRoot: string, conversationId: string): ChildConvS
     childPlan && childPlan.total > 0
       ? { done: childPlan.completed, total: childPlan.total }
       : null;
+  const turnEnded = isTranscriptTurnEnded(rows);
 
   return {
     lastType: lr?.type ?? null,
@@ -678,6 +709,7 @@ function inspectChildConv(brainRoot: string, conversationId: string): ChildConvS
     lastActivity,
     stepCount: rows.length,
     stepProgress,
+    turnEnded,
     hasAskQ,
     stopIdle,
     stopBusy,
@@ -1247,6 +1279,7 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
             lastActivity: null,
             stepCount: 0,
             stepProgress: null,
+            turnEnded: null,
             hasAskQ: false,
             stopIdle: false,
             stopBusy: false,
@@ -1316,12 +1349,18 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     } else if (child.lastType === "ERROR_MESSAGE") {
       state = "failed";
     } else if (
-      (Number(raw.last_nudged_seq ?? 0) > Number(raw.wait_since ?? 0) && !child.stopIdle) ||
       child.stopBusy ||
       child.hasOpenTask ||
       child.lastStatus === "RUNNING" ||
       child.lastStatus === "PENDING" ||
-      child.lastStatus === "GENERATING"
+      child.lastStatus === "GENERATING" ||
+      (child.turnEnded === false && !child.stopIdle) ||
+      (Number(raw.last_nudged_seq ?? 0) > Number(raw.wait_since ?? 0) && !child.stopIdle) ||
+      (child.turnEnded === null &&
+        raw.wake_mode !== "mentions" &&
+        raw.wake_mode !== "anything" &&
+        !child.stopIdle &&
+        Number(raw.wait_since ?? 0) === 0)
     ) {
       state = "working";
     } else {

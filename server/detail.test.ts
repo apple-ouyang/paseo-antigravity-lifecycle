@@ -481,3 +481,65 @@ test("inspectAgySession switches progress to new Swarm wave when plan.json is st
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
+
+test("inspectAgySession matches official AGY turnEnded logic for mid-turn wakeups vs swarm_wait", () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-turnended-"));
+  try {
+    const now = Date.now();
+    const brain = path.join(homeDir, ".gemini", "antigravity-cli", "brain");
+    const iso1 = new Date(now - 60_000).toISOString();
+    const iso2 = new Date(now - 10_000).toISOString();
+
+    writeJsonl(path.join(brain, "te-coord", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "USER_INPUT", status: "DONE", created_at: iso1, content: "/swarm go" },
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: iso2, tool_calls: [{ name: "swarm_wait", args: { since: 5 } }] },
+    ]);
+    writeJson(path.join(brain, "te-coord", ".system_generated", "logs", "process.json"), {
+      conversationId: "te-coord",
+      pid: 77771,
+      event: "PreInvocation",
+      ts: now - 5_000,
+    });
+    writeJson(path.join(brain, "te-coord", ".system_generated", "swarm", "members.json"), {
+      title: "TurnEnded Check",
+      members: {
+        coordinator: { conversation_id: "te-coord", role: "coordinator" },
+        "w-woken": { conversation_id: "c-woken", role: "worker", killed: false, wait_since: 5, last_nudged_seq: 5 },
+        "w-tool": { conversation_id: "c-tool", role: "worker", killed: false, wait_since: 5, last_nudged_seq: 5 },
+        "w-parked": { conversation_id: "c-parked", role: "worker", killed: false, wait_since: 5, last_nudged_seq: 5 },
+      },
+    });
+
+    // 1. Woken by SYSTEM_MESSAGE (no PLANNER_RESPONSE yet -> mid-turn working!)
+    writeJsonl(path.join(brain, "c-woken", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", created_at: iso1, content: "waiting" },
+      { step_index: 2, type: "SYSTEM_MESSAGE", status: "DONE", created_at: iso2, content: "[swarm] new board message #6" },
+    ]);
+    // 2. Non-wait tool results returned (model thinking on tool outputs -> mid-turn working!)
+    writeJsonl(path.join(brain, "c-tool", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", created_at: iso1, tool_calls: [{ name: "run_command", args: {} }] },
+      { step_index: 2, type: "GENERIC", status: "DONE", created_at: iso2, content: "exit 0" },
+    ]);
+    // 3. Parked in swarm_wait with GENERIC DONE -> waiting!
+    writeJsonl(path.join(brain, "c-parked", ".system_generated", "logs", "transcript.jsonl"), [
+      { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", created_at: iso1, tool_calls: [{ name: "swarm_wait", args: { since: 5 } }] },
+      { step_index: 2, type: "GENERIC", status: "DONE", created_at: iso2, content: "waiting" },
+    ]);
+
+    const st = inspectAgySession({
+      agentId: "agent-te",
+      sessionId: "te-coord",
+      agentAlive: true,
+      homeDir,
+      now,
+      isPidAlive: () => true,
+    });
+    assert.ok(st?.swarm);
+    const byName = new Map(st.swarm.members.map((m) => [m.name, m.state]));
+    assert.equal(byName.get("w-woken"), "working");
+    assert.equal(byName.get("w-tool"), "working");
+    assert.equal(byName.get("w-parked"), "waiting");
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
