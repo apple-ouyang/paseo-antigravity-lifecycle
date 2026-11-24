@@ -7,6 +7,7 @@ import {
   clearTranscriptCache,
   collectAllowedChildIds,
   inspectAgyConsole,
+  readChildStepDetail,
   readChildTranscript,
   readSwarmBoard,
 } from "./detail.ts";
@@ -598,6 +599,76 @@ test("inspectAgySession clears stale [done] on rework, recognizes [review:x] PAS
     const byName = new Map(st.swarm.members.map((m) => [m.name, m]));
     assert.equal(byName.get("lane-pass")?.delivered, true);
     assert.equal(byName.get("lane-rework")?.delivered, false);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("readChildStepDetail loads full untruncated content, thinking, post_message text, and paired tool output", () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), "paseo-agy-stepdetail-"));
+  try {
+    const brain = path.join(homeDir, ".gemini", "antigravity-cli", "brain");
+    const logs = path.join(brain, "worker-full", ".system_generated", "logs");
+    const iso = new Date().toISOString();
+    const longPost = "@coordinator [done] 定案意见：" + "详细论证内容。".repeat(80);
+    const longThinking = "Deep chain of thought " + "reasoning ".repeat(50);
+
+    // Compact transcript has truncated args, while transcript_full has complete content
+    writeJsonl(path.join(logs, "transcript.jsonl"), [
+      {
+        step_index: 14,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: iso,
+        model: "claude-opus-5-5-high",
+        tool_calls: [{ name: "post_message", args: { text: `"${longPost.slice(0, 60)}` } }],
+      },
+      { step_index: 15, type: "GENERIC", status: "DONE", created_at: iso, content: "Posted #2" },
+    ]);
+    writeJsonl(path.join(logs, "transcript_full.jsonl"), [
+      {
+        step_index: 14,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: iso,
+        model: "claude-opus-5-5-high",
+        thinking: longThinking,
+        tool_calls: [
+          { name: "post_message", args: { text: JSON.stringify(longPost) } },
+          { name: "swarm_wait", args: { since: 1 } },
+        ],
+      },
+      {
+        step_index: 15,
+        type: "GENERIC",
+        status: "DONE",
+        created_at: iso,
+        content: "Created At: 2026-11-24T22:09:00+08:00\nCompleted At: 2026-11-24T22:09:00+08:00\nPosted message #2",
+      },
+      {
+        step_index: 16,
+        type: "GENERIC",
+        status: "DONE",
+        created_at: iso,
+        content: "Waiting on board > #1",
+      },
+    ]);
+
+    const allowed = new Set(["worker-full"]);
+    const detail = readChildStepDetail(brain, allowed, "worker-full", 14);
+    assert.ok(detail);
+    assert.equal(detail.stepIndex, 14);
+    assert.equal(detail.model, "claude-opus-5-5-high");
+    assert.equal(detail.thinking, longThinking.trim());
+    assert.equal(detail.toolCalls.length, 2);
+    assert.equal(detail.toolCalls[0]?.name, "post_message");
+    assert.equal(detail.toolCalls[0]?.primaryText, longPost);
+    assert.equal(detail.toolCalls[0]?.output, "Posted message #2");
+    assert.equal(detail.toolCalls[1]?.name, "swarm_wait");
+    assert.equal(detail.toolCalls[1]?.output, "Waiting on board > #1");
+
+    // Unauthorized conversation must be denied
+    assert.equal(readChildStepDetail(brain, allowed, "other-secret", 14), null);
   } finally {
     rmSync(homeDir, { recursive: true, force: true });
   }

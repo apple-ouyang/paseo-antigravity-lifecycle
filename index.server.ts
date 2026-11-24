@@ -6,6 +6,7 @@ import {
   clearTranscriptCache,
   collectAllowedChildIds,
   inspectAgyConsole,
+  readChildStepDetail,
   readChildTranscript,
   readSwarmBoard,
 } from "./server/detail.ts";
@@ -13,6 +14,7 @@ import { ensureAntigravityHooksInstalled } from "./server/hooks.ts";
 import { clearStatusCaches, inspectAgySession } from "./server/status.ts";
 import {
   agyBoardSliceGet,
+  agyChildStepDetailGet,
   agyChildTranscriptGet,
   agyConsoleGet,
   agyLifecycleGet,
@@ -263,6 +265,25 @@ export default function contribute(server: PluginServerContext) {
     if (!status) return null;
     const allowed = collectAllowedChildIds(status);
     return readChildTranscript(brainRoot, allowed, conversationId, limit ?? 60, afterCursor);
+  });
+
+  server.handle(agyChildStepDetailGet, async ({ agentId, conversationId, stepIndex }, context) => {
+    const resolved = await resolveAgentAndSession(
+      context.paseo,
+      agentId,
+      refreshedAt,
+      inFlightRefresh,
+      knownSessions,
+    );
+    if (!resolved) return null;
+    const status = inspectAgySession({
+      agentId: resolved.agentId,
+      sessionId: resolved.sessionId,
+      agentAlive: resolved.agentAlive,
+    });
+    if (!status) return null;
+    const allowed = collectAllowedChildIds(status);
+    return readChildStepDetail(brainRoot, allowed, conversationId, stepIndex);
   });
 
   server.handle(agyLifecycleWatch, (_input, context) => {

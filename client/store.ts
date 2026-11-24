@@ -1,6 +1,7 @@
 import type {
   AgentBgStatus,
   AgyConsoleDetail,
+  ChildStepDetail,
   ChildTranscriptResponse,
   TranscriptStep,
 } from "../shared/rpc.ts";
@@ -98,8 +99,28 @@ const pendingNavs = new Map<string, ConsoleNavRequest>();
 const navListeners = new Set<() => void>();
 
 const childTranscriptCache = new Map<string, ChildTranscriptCacheEntry>();
+const childStepDetailCache = new Map<string, { detail: ChildStepDetail; updatedAt: number }>();
 const consoleDetailCache = new Map<string, { detail: AgyConsoleDetail; updatedAt: number }>();
 const submittedQuestionAnswers = new Map<string, string>();
+
+const MAX_STEP_DETAIL_CACHE = 160;
+
+export function getChildStepDetailCache(
+  conversationId: string,
+  stepIndex: number,
+): ChildStepDetail | null {
+  const key = `${conversationId}:${stepIndex}`;
+  const hit = childStepDetailCache.get(key);
+  if (!hit) return null;
+  hit.updatedAt = Date.now();
+  return hit.detail;
+}
+
+export function setChildStepDetailCache(detail: ChildStepDetail): void {
+  const key = `${detail.conversationId}:${detail.stepIndex}`;
+  childStepDetailCache.set(key, { detail, updatedAt: Date.now() });
+  evictOldest(childStepDetailCache, MAX_STEP_DETAIL_CACHE);
+}
 
 export function getSubmittedQuestionAnswer(key: string): string | null {
   return submittedQuestionAnswers.get(key) ?? null;
@@ -193,6 +214,7 @@ export function replaceAllStatuses(next: Record<string, AgentBgStatus>): void {
 export function clearAllStatuses(): void {
   pendingNavs.clear();
   childTranscriptCache.clear();
+  childStepDetailCache.clear();
   consoleDetailCache.clear();
   if (Object.keys(statuses).length === 0) return;
   statuses = {};

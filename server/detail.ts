@@ -1,16 +1,20 @@
-import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type {
   AgyConsoleDetail,
+  ChildStepDetail,
+  ChildStepToolDetail,
   ChildTranscriptResponse,
   SwarmBoardPost,
   SwarmPlan,
   TranscriptStep,
 } from "../shared/rpc.ts";
 import {
+  cleanArg,
   inspectAgySession,
   readJsonSafe,
+  readTranscriptRows,
   summarizeToolCall,
   type InspectAgySessionInput,
 } from "./status.ts";
@@ -197,6 +201,30 @@ function evictTranscriptCacheIfNeeded(): void {
   if (oldestKey) transcriptCache.delete(oldestKey);
 }
 
+const SYSTEM_BOILERPLATE_RE =
+  /^The following is a(?:n)?\s+(?:not actually sent by the user\.?\s*)?(?:<SYSTEM_MESSAGE>\s*)?(?:not actually sent by the user\.?\s*)?(?:It is provided by the system as important information to pay attention to\.?\s*)/i;
+
+function stripSystemBoilerplate(raw: string): string {
+  const flat = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const stripped = flat.replace(SYSTEM_BOILERPLATE_RE, "").trim();
+  const contentMatch = /\bcontent=(.+)$/.exec(stripped);
+  return contentMatch?.[1]?.trim() || stripped;
+}
+
+function summarizeToolCallForStep(tc: {
+  name?: string;
+  args?: Record<string, unknown>;
+}): string {
+  if (tc.name === "post_message") {
+    const txt = cleanArg(tc.args?.text);
+    if (txt) {
+      const single = String(txt).replace(/\s+/g, " ").trim();
+      return `发帖: ${clipText(single, 160)}`;
+    }
+  }
+  return summarizeToolCall(tc);
+}
+
 function parseTranscriptRowIntoSteps(
   r: RawTranscriptRow,
   steps: TranscriptStep[],
@@ -218,6 +246,7 @@ function parseTranscriptRowIntoSteps(
       status,
       createdAt,
       model,
+      hasDetail: (r.content?.length ?? 0) > 200,
     });
   } else if (r.type === "ERROR_MESSAGE") {
     steps.push({
@@ -228,31 +257,36 @@ function parseTranscriptRowIntoSteps(
       status,
       createdAt,
       model,
+      hasDetail: true,
     });
   } else if (r.type === "SYSTEM_MESSAGE") {
     const content = r.content ?? "";
     if (content.includes("[board]") || content.includes("[Message]") || content.includes("[swarm]")) {
+      const clean = stripSystemBoilerplate(content);
       steps.push({
         stepIndex,
         kind: "system",
         title: content.includes("[board]") ? "消息板通知" : "系统唤醒",
-        summary: clipText(content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "), 400),
+        summary: clipText(clean, 320),
         status,
         createdAt,
         model,
+        hasDetail: content.length > 260,
       });
     }
   } else if (r.type === "PLANNER_RESPONSE") {
+    const hasThinking = Boolean(r.thinking && r.thinking.trim().length > 0);
     if (r.tool_calls && r.tool_calls.length > 0) {
-      const summaries = r.tool_calls.map((tc) => summarizeToolCall(tc));
+      const summaries = r.tool_calls.map((tc) => summarizeToolCallForStep(tc));
       steps.push({
         stepIndex,
         kind: "tool",
-        title: summaries.length === 1 ? summaries[0] : `${summaries.length} 个工具调用`,
+        title: summaries.length === 1 ? clipText(summaries[0], 72) : `${summaries.length} 个工具调用`,
         summary: summaries.join(" · "),
         status,
         createdAt,
         model,
+        hasDetail: true,
       });
     }
     if (r.content && r.content.trim().length > 0) {
@@ -264,16 +298,18 @@ function parseTranscriptRowIntoSteps(
         status,
         createdAt,
         model,
+        hasDetail: r.content.length > 400 || hasThinking,
       });
-    } else if (r.thinking && r.thinking.trim().length > 0 && !(r.tool_calls && r.tool_calls.length > 0)) {
+    } else if (hasThinking && !(r.tool_calls && r.tool_calls.length > 0)) {
       steps.push({
         stepIndex,
         kind: "thinking",
         title: "思考中",
-        summary: clipText(r.thinking, 400),
+        summary: clipText(r.thinking ?? "", 400),
         status,
         createdAt,
         model,
+        hasDetail: true,
       });
     }
   }
@@ -461,6 +497,179 @@ export function readChildTranscript(
     cursor: totalSteps,
     mode: "full",
     unchanged: false,
+  };
+}
+
+const MAX_DETAIL_FIELD_CHARS = 24_000;
+const MAX_TOOL_OUTPUT_CHARS = 16_000;
+
+function capDetailText(raw: string | null | undefined, maxChars: number): { text: string | null; truncated: boolean } {
+  if (!raw) return { text: null, truncated: false };
+  const trimmed = raw.trim();
+  if (!trimmed) return { text: null, truncated: false };
+  if (trimmed.length <= maxChars) return { text: trimmed, truncated: false };
+  return { text: `${trimmed.slice(0, maxChars)}\n…(已截断，原文共 ${trimmed.length} 字)`, truncated: true };
+}
+
+function cleanGenericToolOutput(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const lines = raw.split("\n");
+  let start = 0;
+  while (start < lines.length && /^(?:Created At|Completed At):\s/i.test(lines[start].trim())) {
+    start += 1;
+  }
+  const rest = lines.slice(start).join("\n").trim();
+  return rest || raw.trim() || null;
+}
+
+function extractToolPrimaryAndArgs(tc: {
+  name?: string;
+  args?: Record<string, unknown>;
+}): { primaryText: string | null; argsText: string | null; truncated: boolean } {
+  const name = tc.name ?? "tool";
+  const rawArgs = tc.args ?? {};
+  const cleaned: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rawArgs)) {
+    cleaned[k] = cleanArg(v);
+  }
+
+  let primaryRaw: string | null = null;
+  const omittedKeys = new Set<string>();
+
+  if (name === "post_message" && typeof cleaned.text === "string") {
+    primaryRaw = cleaned.text;
+    omittedKeys.add("text");
+  } else if (name === "run_command" && typeof cleaned.CommandLine === "string") {
+    primaryRaw = cleaned.CommandLine;
+    omittedKeys.add("CommandLine");
+  } else if (name === "send_message" && typeof cleaned.Message === "string") {
+    primaryRaw = cleaned.Message;
+    omittedKeys.add("Message");
+  } else if (name === "swarm" && typeof cleaned.brief === "string") {
+    primaryRaw = cleaned.brief;
+    omittedKeys.add("brief");
+  } else if (name === "invoke_subagent" && typeof cleaned.Prompt === "string") {
+    primaryRaw = cleaned.Prompt;
+    omittedKeys.add("Prompt");
+  } else if (name === "read_file" && typeof cleaned.Path === "string") {
+    const range =
+      cleaned.StartLine !== undefined || cleaned.EndLine !== undefined
+        ? ` (L${cleaned.StartLine ?? 1}–L${cleaned.EndLine ?? "end"})`
+        : "";
+    primaryRaw = `${cleaned.Path}${range}`;
+    omittedKeys.add("Path");
+    omittedKeys.add("StartLine");
+    omittedKeys.add("EndLine");
+  } else if ((name === "edit_file" || name === "write_file") && typeof cleaned.Path === "string") {
+    primaryRaw = String(cleaned.Path);
+    omittedKeys.add("Path");
+  }
+
+  const remaining: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(cleaned)) {
+    if (omittedKeys.has(k) || v === undefined || v === null) continue;
+    remaining[k] = v;
+  }
+
+  const cappedPrimary = capDetailText(primaryRaw, MAX_DETAIL_FIELD_CHARS);
+  let argsRaw: string | null = null;
+  if (Object.keys(remaining).length > 0) {
+    try {
+      argsRaw = JSON.stringify(remaining, null, 2);
+    } catch {
+      argsRaw = null;
+    }
+  }
+  const cappedArgs = capDetailText(argsRaw, 6_000);
+  return {
+    primaryText: cappedPrimary.text,
+    argsText: cappedArgs.text,
+    truncated: cappedPrimary.truncated || cappedArgs.truncated,
+  };
+}
+
+export function readChildStepDetail(
+  brainRoot: string,
+  allowedIds: Set<string>,
+  conversationId: string,
+  stepIndex: number,
+): ChildStepDetail | null {
+  if (
+    !conversationId ||
+    conversationId.includes("/") ||
+    conversationId.includes("..") ||
+    !allowedIds.has(conversationId) ||
+    !Number.isInteger(stepIndex) ||
+    stepIndex < 0
+  ) {
+    return null;
+  }
+
+  const logsDir = path.join(brainRoot, conversationId, ".system_generated", "logs");
+  const fullPath = path.join(logsDir, "transcript_full.jsonl");
+  const compactPath = path.join(logsDir, "transcript.jsonl");
+  const targetPath = existsSync(fullPath) ? fullPath : compactPath;
+  const rows = readTranscriptRows(targetPath);
+  if (rows.length === 0) return null;
+
+  let rowIdx = rows.findIndex((r) => r.step_index === stepIndex);
+  if (rowIdx < 0 && stepIndex < rows.length) {
+    rowIdx = stepIndex;
+  }
+  if (rowIdx < 0) return null;
+
+  const row = rows[rowIdx];
+  let truncated = false;
+
+  const rawContent =
+    row.type === "SYSTEM_MESSAGE" && row.content
+      ? stripSystemBoilerplate(row.content)
+      : row.content;
+  const cappedContent = capDetailText(rawContent, MAX_DETAIL_FIELD_CHARS);
+  const cappedThinking = capDetailText(row.thinking, MAX_DETAIL_FIELD_CHARS);
+  truncated = truncated || cappedContent.truncated || cappedThinking.truncated;
+
+  const toolCalls: ChildStepToolDetail[] = [];
+  if (row.type === "PLANNER_RESPONSE" && Array.isArray(row.tool_calls) && row.tool_calls.length > 0) {
+    // AGY logs GENERIC tool results immediately after PLANNER_RESPONSE in exact call order.
+    const followingGenerics: typeof rows = [];
+    for (let j = rowIdx + 1; j < rows.length && followingGenerics.length < row.tool_calls.length; j += 1) {
+      if (rows[j].type === "GENERIC") {
+        followingGenerics.push(rows[j]);
+      } else {
+        break;
+      }
+    }
+
+    for (let k = 0; k < row.tool_calls.length; k += 1) {
+      const tc = row.tool_calls[k];
+      const paired = followingGenerics[k];
+      const { primaryText, argsText, truncated: tTrunc } = extractToolPrimaryAndArgs(tc);
+      const outClean = cleanGenericToolOutput(paired?.content);
+      const cappedOut = capDetailText(outClean, MAX_TOOL_OUTPUT_CHARS);
+      truncated = truncated || tTrunc || cappedOut.truncated;
+      toolCalls.push({
+        name: tc.name ?? "tool",
+        summary: summarizeToolCall(tc),
+        primaryText,
+        argsText,
+        output: cappedOut.text,
+        outputStatus: typeof paired?.status === "string" ? paired.status : null,
+      });
+    }
+  }
+
+  return {
+    conversationId,
+    stepIndex: typeof row.step_index === "number" ? row.step_index : stepIndex,
+    type: String(row.type ?? "UNKNOWN"),
+    status: typeof row.status === "string" ? row.status : null,
+    createdAt: typeof row.created_at === "string" ? row.created_at : null,
+    model: typeof row.model === "string" && row.model.length > 0 ? row.model : null,
+    content: cappedContent.text,
+    thinking: cappedThinking.text,
+    toolCalls,
+    truncated,
   };
 }
 

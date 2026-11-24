@@ -15,10 +15,12 @@ import {
   type PluginAgentPanelProps,
 } from "@getpaseo/plugin/client";
 import {
+  agyChildStepDetailGet,
   agyChildTranscriptGet,
   agyConsoleGet,
   type AgyConsoleDetail,
   type AgyMode,
+  type ChildStepDetail,
   type SubagentCategory,
   type SubagentItem,
   type SwarmBoardPost,
@@ -31,12 +33,14 @@ import {
   applyChildTranscriptResponse,
   consumeConsoleNavRequest,
   formatLocalTimestamp,
+  getChildStepDetailCache,
   getChildTranscriptCache,
   getConsoleDetailCache,
   getConsoleNavRequest,
   getStatusSnapshot,
   resolveMemberChildFromStatus,
   resolveSubagentChildFromStatus,
+  setChildStepDetailCache,
   setConsoleDetailCache,
   subscribeConsoleNav,
   subscribeStatus,
@@ -481,12 +485,283 @@ function BoardPostRow({
   );
 }
 
+function ChildStepRow({
+  agentId,
+  conversationId,
+  step,
+  theme,
+  fetchStepDetail,
+}: {
+  agentId: string;
+  conversationId: string;
+  step: TranscriptStep;
+  theme: PluginTheme;
+  fetchStepDetail: (input: {
+    agentId: string;
+    conversationId: string;
+    stepIndex: number;
+  }) => Promise<ChildStepDetail | null>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [detail, setDetail] = useState<ChildStepDetail | null>(() =>
+    getChildStepDetailCache(conversationId, step.stepIndex),
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [openOutputs, setOpenOutputs] = useState<Record<number, boolean>>({});
+
+  const toggleExpand = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (!next) return;
+
+    const cached = getChildStepDetailCache(conversationId, step.stepIndex);
+    if (cached) {
+      setDetail(cached);
+      return;
+    }
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    void fetchStepDetail({
+      agentId,
+      conversationId,
+      stepIndex: step.stepIndex,
+    })
+      .then((res) => {
+        if (res) {
+          setChildStepDetailCache(res);
+          setDetail(res);
+        } else {
+          setError("未能读取该步骤的完整详情");
+        }
+      })
+      .catch((err: unknown) => {
+        setError(`读取详情失败：${err instanceof Error ? err.message : String(err)}`);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  };
+
+  return (
+    <View
+      style={{
+        backgroundColor:
+          step.kind === "user" || step.kind === "assistant"
+            ? theme.colors.surface2
+            : theme.colors.surface1,
+        borderColor: expanded ? theme.colors.accent : theme.colors.border,
+        borderWidth: 1,
+        borderLeftWidth: 3,
+        borderLeftColor: stepKindColor(step.kind, theme),
+        borderRadius: 8,
+        padding: 9,
+        gap: 6,
+      }}
+    >
+      <Pressable
+        onPress={toggleExpand}
+        style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}
+      >
+        <Text
+          style={{
+            color: stepKindColor(step.kind, theme),
+            fontSize: 11,
+            fontWeight: "700",
+            flexShrink: 1,
+          }}
+          numberOfLines={1}
+        >
+          #{step.stepIndex} · {step.title}
+        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
+            {expanded ? "收起 ▾" : "详情 ▸"}
+          </Text>
+          {step.createdAt ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+              {formatLocalTimestamp(step.createdAt)}
+            </Text>
+          ) : null}
+        </View>
+      </Pressable>
+
+      {!expanded && step.summary ? (
+        <Pressable onPress={toggleExpand}>
+          <Text style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
+            {step.summary}
+          </Text>
+        </Pressable>
+      ) : null}
+
+      {expanded ? (
+        <View
+          style={{
+            borderTopWidth: 1,
+            borderTopColor: theme.colors.border,
+            paddingTop: 8,
+            gap: 8,
+          }}
+        >
+          {loading ? (
+            <Text style={{ color: theme.colors.accent, fontSize: 11 }}>
+              正在读取完整详情（transcript_full）…
+            </Text>
+          ) : error ? (
+            <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>{error}</Text>
+          ) : detail ? (
+            <View style={{ gap: 8 }}>
+              {detail.content ? (
+                <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 19 }}>
+                  {detail.content}
+                </Text>
+              ) : null}
+
+              {detail.toolCalls.map((tc, tIdx) => {
+                const isLongOut = (tc.output?.length ?? 0) > 600;
+                const outOpen = openOutputs[tIdx] ?? !isLongOut;
+                return (
+                  <View
+                    key={`${tIdx}-${tc.name}`}
+                    style={{
+                      backgroundColor: theme.colors.surface0,
+                      borderColor: theme.colors.border,
+                      borderWidth: 1,
+                      borderRadius: 7,
+                      padding: 9,
+                      gap: 6,
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "700", flexShrink: 1 }} numberOfLines={1}>
+                        {tc.name} · {tc.summary}
+                      </Text>
+                      {tc.outputStatus ? (
+                        <Text
+                          style={{
+                            color:
+                              tc.outputStatus === "ERROR"
+                                ? theme.colors.statusDanger
+                                : theme.colors.statusSuccess,
+                            fontSize: 10,
+                            fontWeight: "600",
+                          }}
+                        >
+                          {tc.outputStatus}
+                        </Text>
+                      ) : null}
+                    </View>
+
+                    {tc.primaryText ? (
+                      <Text
+                        selectable
+                        style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 19 }}
+                      >
+                        {tc.primaryText}
+                      </Text>
+                    ) : null}
+
+                    {tc.argsText ? (
+                      <Text
+                        selectable
+                        style={{
+                          color: theme.colors.foregroundMuted,
+                          fontSize: 11,
+                          lineHeight: 16,
+                          backgroundColor: theme.colors.surface1,
+                          borderRadius: 5,
+                          padding: 7,
+                        }}
+                      >
+                        {tc.argsText}
+                      </Text>
+                    ) : null}
+
+                    {tc.output ? (
+                      <View style={{ gap: 4 }}>
+                        <Pressable
+                          onPress={() =>
+                            setOpenOutputs((prev) => ({ ...prev, [tIdx]: !outOpen }))
+                          }
+                        >
+                          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600" }}>
+                            {outOpen
+                              ? `▾ 收起执行结果 (${tc.output.length} 字)`
+                              : `▸ 展开执行结果 (${tc.output.length} 字)`}
+                          </Text>
+                        </Pressable>
+                        {outOpen ? (
+                          <Text
+                            selectable
+                            style={{
+                              color: theme.colors.foreground,
+                              fontSize: 11,
+                              lineHeight: 17,
+                              backgroundColor: theme.colors.surface1,
+                              borderRadius: 5,
+                              padding: 7,
+                            }}
+                          >
+                            {tc.output}
+                          </Text>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })}
+
+              {detail.thinking ? (
+                <View
+                  style={{
+                    backgroundColor: theme.colors.surface0,
+                    borderColor: theme.colors.border,
+                    borderWidth: 1,
+                    borderRadius: 7,
+                    padding: 8,
+                    gap: 6,
+                  }}
+                >
+                  <Pressable onPress={() => setThinkingOpen((v) => !v)}>
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600" }}>
+                      {thinkingOpen
+                        ? `▾ 收起思考过程 (${detail.thinking.length} 字)`
+                        : `▸ 展开思考过程 (${detail.thinking.length} 字)`}
+                    </Text>
+                  </Pressable>
+                  {thinkingOpen ? (
+                    <Text
+                      selectable
+                      style={{ color: theme.colors.foregroundMuted, fontSize: 11, lineHeight: 17 }}
+                    >
+                      {detail.thinking}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+
+              {!detail.content && detail.toolCalls.length === 0 && !detail.thinking ? (
+                <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
+                  {step.summary || "该步骤无额外详情"}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 export function AgyConsolePanel(props: PluginAgentPanelProps) {
   const { theme } = props;
   const agentId = props.params?.agentId ?? props.agentId;
   const paseo = usePaseo();
   const fetchConsole = useRpc(agyConsoleGet);
   const fetchChildTranscript = useRpc(agyChildTranscriptGet);
+  const fetchChildStepDetail = useRpc(agyChildStepDetailGet);
 
   const liveStatus = useSyncExternalStore(
     subscribeStatus,
@@ -1210,46 +1485,14 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
             </Text>
           ) : (
             orderedSteps.map((step, idx) => (
-              <View
-                key={`${step.stepIndex}-${step.kind}-${idx}`}
-                style={{
-                  backgroundColor:
-                    step.kind === "user" || step.kind === "assistant"
-                      ? theme.colors.surface2
-                      : theme.colors.surface1,
-                  borderColor: theme.colors.border,
-                  borderWidth: 1,
-                  borderLeftWidth: 3,
-                  borderLeftColor: stepKindColor(step.kind, theme),
-                  borderRadius: 8,
-                  padding: 9,
-                  gap: 4,
-                }}
-              >
-                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                  <Text
-                    style={{
-                      color: stepKindColor(step.kind, theme),
-                      fontSize: 11,
-                      fontWeight: "700",
-                      flexShrink: 1,
-                    }}
-                    numberOfLines={1}
-                  >
-                    #{step.stepIndex} · {step.title}
-                  </Text>
-                  {step.createdAt ? (
-                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
-                      {formatLocalTimestamp(step.createdAt)}
-                    </Text>
-                  ) : null}
-                </View>
-                {step.summary ? (
-                  <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
-                    {step.summary}
-                  </Text>
-                ) : null}
-              </View>
+              <ChildStepRow
+                key={`${selectedChild.conversationId}-${step.stepIndex}-${step.kind}-${idx}`}
+                agentId={agentId}
+                conversationId={selectedChild.conversationId}
+                step={step}
+                theme={theme}
+                fetchStepDetail={fetchChildStepDetail}
+              />
             ))
           )}
         </ScrollView>

@@ -182,6 +182,29 @@ export const TranscriptStepSchema = z.object({
   status: z.string().nullable(),
   createdAt: z.string().nullable(),
   model: z.string().nullable(),
+  hasDetail: z.boolean().optional(),
+});
+
+export const ChildStepToolDetailSchema = z.object({
+  name: z.string(),
+  summary: z.string(),
+  primaryText: z.string().nullable(),
+  argsText: z.string().nullable(),
+  output: z.string().nullable(),
+  outputStatus: z.string().nullable(),
+});
+
+export const ChildStepDetailSchema = z.object({
+  conversationId: z.string(),
+  stepIndex: z.number().int(),
+  type: z.string(),
+  status: z.string().nullable(),
+  createdAt: z.string().nullable(),
+  model: z.string().nullable(),
+  content: z.string().nullable(),
+  thinking: z.string().nullable(),
+  toolCalls: z.array(ChildStepToolDetailSchema),
+  truncated: z.boolean(),
 });
 
 export const AgentBgStatusSchema = z.object({
@@ -296,9 +319,21 @@ export const agyChildTranscriptGet = defineRpc({
     .nullable(),
 });
 
+export const agyChildStepDetailGet = defineRpc({
+  name: "antigravity-lifecycle.child.step.detail",
+  input: z.object({
+    agentId: z.string().min(1),
+    conversationId: z.string().min(1),
+    stepIndex: z.number().int().min(0),
+  }),
+  output: ChildStepDetailSchema.nullable(),
+});
+
 export type ChildTranscriptResponse = NonNullable<
   z.infer<typeof agyChildTranscriptGet.output>
 >;
+export type ChildStepToolDetail = z.infer<typeof ChildStepToolDetailSchema>;
+export type ChildStepDetail = z.infer<typeof ChildStepDetailSchema>;
 
 export type AgyMode = z.infer<typeof AgyModeSchema>;
 export type AgyPrimaryMode = z.infer<typeof AgyPrimaryModeSchema>;
