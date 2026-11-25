@@ -4,6 +4,8 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { usePaseo, useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { agyBoardSliceGet, type SwarmBoardPost } from "../shared/rpc.ts";
 import type { AgyQuestionItem, AgyToolCardData } from "../shared/timeline.ts";
+import { RichMarkdown } from "./markdown.tsx";
+import { clipMarkdownPreview } from "./markdown-normalize.ts";
 import {
   formatLocalTimestamp,
   getStatusSnapshot,
@@ -735,18 +737,7 @@ export function AgyToolCard({
             gap: 6,
           }}
         >
-          {data.body ? (
-            <Text
-              selectable
-              style={{
-                color: theme.colors.foreground,
-                fontSize: 12,
-                lineHeight: 18,
-              }}
-            >
-              {data.body}
-            </Text>
-          ) : null}
+          {data.body ? <RichMarkdown text={data.body} theme={theme} /> : null}
 
           {data.category === "swarm_read" || data.category === "swarm_wait" ? (
             boardLoading ? (
@@ -775,13 +766,7 @@ export function AgyToolCard({
                         </Text>
                       ) : null}
                     </View>
-                    <Text
-                      selectable
-                      style={{ color: theme.colors.foreground, fontSize: 11, lineHeight: 16 }}
-                      numberOfLines={6}
-                    >
-                      {post.text}
-                    </Text>
+                    <RichMarkdown text={clipMarkdownPreview(post.text, 600)} theme={theme} />
                   </View>
                 ))}
               </View>

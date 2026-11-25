@@ -31,6 +31,8 @@ import {
   type TranscriptStep,
 } from "../shared/rpc.ts";
 import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
+import { RichMarkdown } from "./markdown.tsx";
+import { clipMarkdownPreview } from "./markdown-normalize.ts";
 import {
   applyChildTranscriptResponse,
   consumeConsoleNavRequest,
@@ -456,13 +458,10 @@ function BoardPostRow({
         ) : null}
       </View>
 
-      <Text
-        selectable
-        style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}
-        numberOfLines={expanded ? undefined : 5}
-      >
-        {post.text}
-      </Text>
+      <RichMarkdown
+        text={expanded ? post.text : clipMarkdownPreview(post.text, 320)}
+        theme={theme}
+      />
 
       {post.screenshots.length > 0 ? (
         <View style={{ gap: 2 }}>
@@ -877,14 +876,7 @@ function ToolCallItemRow({
             </View>
           ) : null}
 
-          {tc.primaryText ? (
-            <Text
-              selectable
-              style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}
-            >
-              {tc.primaryText}
-            </Text>
-          ) : null}
+          {tc.primaryText ? <RichMarkdown text={tc.primaryText} theme={theme} /> : null}
 
           {tc.argsText ? (
             <Text
@@ -1052,11 +1044,15 @@ function ChildStepRow({
       </Pressable>
 
       {!expanded && step.summary ? (
-        <Pressable onPress={toggleExpand}>
-          <Text style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
-            {step.summary}
-          </Text>
-        </Pressable>
+        step.kind === "assistant" || step.kind === "user" ? (
+          <RichMarkdown text={clipMarkdownPreview(step.summary, 420)} theme={theme} />
+        ) : (
+          <Pressable onPress={toggleExpand}>
+            <Text style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
+              {step.summary}
+            </Text>
+          </Pressable>
+        )
       ) : null}
 
       {expanded ? (
@@ -1076,11 +1072,7 @@ function ChildStepRow({
             <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>{error}</Text>
           ) : detail ? (
             <View style={{ gap: 8 }}>
-              {detail.content ? (
-                <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 19 }}>
-                  {detail.content}
-                </Text>
-              ) : null}
+              {detail.content ? <RichMarkdown text={detail.content} theme={theme} /> : null}
 
               {toolCalls.length > 0 ? (
                 <View style={{ gap: 5 }}>
@@ -1146,21 +1138,18 @@ function ChildStepRow({
                         : `▸ 展开思考过程 (${detail.thinking.length} 字)`}
                     </Text>
                   </Pressable>
-                  {thinkingOpen ? (
-                    <Text
-                      selectable
-                      style={{ color: theme.colors.foregroundMuted, fontSize: 11, lineHeight: 17 }}
-                    >
-                      {detail.thinking}
-                    </Text>
-                  ) : null}
+                  {thinkingOpen ? <RichMarkdown text={detail.thinking} theme={theme} /> : null}
                 </View>
               ) : null}
 
               {!detail.content && toolCalls.length === 0 && !detail.thinking ? (
-                <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
-                  {step.summary || "该步骤无额外详情"}
-                </Text>
+                step.summary ? (
+                  <RichMarkdown text={step.summary} theme={theme} />
+                ) : (
+                  <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>
+                    该步骤无额外详情
+                  </Text>
+                )
               ) : null}
             </View>
           ) : null}
