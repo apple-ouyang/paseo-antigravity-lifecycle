@@ -1,4 +1,4 @@
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { usePaseo, useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
@@ -6,12 +6,15 @@ import { agyBoardSliceGet, type SwarmBoardPost } from "../shared/rpc.ts";
 import type { AgyQuestionItem, AgyToolCardData } from "../shared/timeline.ts";
 import { RichMarkdown } from "./markdown.tsx";
 import { clipMarkdownPreview } from "./markdown-normalize.ts";
+import { ModelEffortBadge } from "./model-badge.tsx";
 import {
   formatLocalTimestamp,
+  formatModelAndEffortText,
   formatModelBadgeLabel,
   getStatusSnapshot,
   getSubmittedQuestionAnswer,
   openConsoleForAgent,
+  refreshAgentStatus,
   resolveMemberChildFromStatus,
   resolveMemberModelFromStatus,
   resolveSubagentChildFromStatus,
@@ -495,9 +498,31 @@ export function AgyToolCard({
     () => getStatusSnapshot(agentId),
     () => getStatusSnapshot(agentId),
   );
+
+  // Hydrate status on demand for historical/closed tabs so model ID + effort badges always resolve.
+  useEffect(() => {
+    if (!liveStatus && agentId) {
+      void refreshAgentStatus(agentId);
+    }
+  }, [agentId, liveStatus]);
+
   const resolvedModel = useMemo(() => {
     if (data.targetMember) {
       return resolveMemberModelFromStatus(liveStatus, data.targetMember, data.model);
+    }
+    if (data.category === "swarm_post") {
+      const concreteMentions = data.mentions.filter((m) => m !== "coordinator" && m !== "all");
+      if (concreteMentions.length === 1) {
+        return resolveMemberModelFromStatus(liveStatus, concreteMentions[0], data.model);
+      }
+      return resolveMemberModelFromStatus(liveStatus, "coordinator", data.model);
+    }
+    if (
+      data.category === "swarm_action" ||
+      data.category === "swarm_read" ||
+      data.category === "swarm_wait"
+    ) {
+      return formatModelBadgeLabel(data.model) ?? formatModelBadgeLabel(liveStatus?.coordinator?.model);
     }
     if (data.category === "subagent_invoke" || data.category === "subagent_message") {
       return resolveSubagentModelFromStatus(
@@ -509,11 +534,19 @@ export function AgyToolCard({
         data.model,
       );
     }
-    if (data.category === "swarm_action" && data.badge === "Swarm 派人") {
-      return formatModelBadgeLabel(data.model) ?? formatModelBadgeLabel(liveStatus?.coordinator?.model);
-    }
     return formatModelBadgeLabel(data.model);
   }, [liveStatus, data]);
+
+  const enrichedSubline = useMemo(() => {
+    if (data.category === "swarm_post" && data.mentions.length > 0 && liveStatus) {
+      const parts = data.mentions.map((m) => {
+        const mText = formatModelAndEffortText(resolveMemberModelFromStatus(liveStatus, m));
+        return mText ? `@${m} (${mText})` : `@${m}`;
+      });
+      return `提及 ${parts.join(" · ")}`;
+    }
+    return data.subline;
+  }, [data, liveStatus]);
   const [expanded, setExpanded] = useState(false);
   const [boardPosts, setBoardPosts] = useState<SwarmBoardPost[] | null>(null);
   const [boardLoading, setBoardLoading] = useState(false);
@@ -618,7 +651,7 @@ export function AgyToolCard({
     return <AgyQuestionCard agentId={agentId} data={data} theme={theme} timeLabel={timeLabel} />;
   }
 
-  // Checklist rendering for update_steps
+  // Checklist rendering for update_steps (whole header clickable, no redundant 展开/收起 button)
   if (data.category === "steps" && data.steps && data.steps.length > 0) {
     return (
       <View
@@ -632,26 +665,22 @@ export function AgyToolCard({
           backgroundColor: theme.colors.surface1,
         }}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <Pressable
+          onPress={() => setExpanded((v) => !v)}
+          style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}
+        >
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
             <Text style={{ color: badgeColor, fontSize: 11, fontWeight: "700" }}>{data.badge}</Text>
             <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "500" }} numberOfLines={1}>
               {data.headline}
             </Text>
           </View>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Pressable onPress={() => setExpanded((v) => !v)}>
-              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-                {expanded ? "收起" : "展开"}
-              </Text>
-            </Pressable>
-            {timeLabel ? (
-              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10, fontFamily: "monospace" }}>
-                {timeLabel}
-              </Text>
-            ) : null}
-          </View>
-        </View>
+          {timeLabel ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10, fontFamily: "monospace" }}>
+              {timeLabel}
+            </Text>
+          ) : null}
+        </Pressable>
         {expanded ? (
           <View style={{ gap: 4, paddingTop: 2 }}>
             {data.steps.map((s, idx) => {
@@ -700,6 +729,7 @@ export function AgyToolCard({
     >
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <Pressable
+          disabled={!canExpand}
           onPress={handleToggle}
           style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}
         >
@@ -719,30 +749,7 @@ export function AgyToolCard({
           >
             {data.headline}
           </Text>
-          {resolvedModel ? (
-            <View
-              style={{
-                backgroundColor: theme.colors.surface2,
-                borderColor: theme.colors.border,
-                borderWidth: 1,
-                borderRadius: 4,
-                paddingHorizontal: 5,
-                paddingVertical: 1,
-                maxWidth: 190,
-              }}
-            >
-              <Text
-                style={{
-                  color: theme.colors.foregroundMuted,
-                  fontSize: 10,
-                  fontFamily: "monospace",
-                }}
-                numberOfLines={1}
-              >
-                {resolvedModel}
-              </Text>
-            </View>
-          ) : null}
+          <ModelEffortBadge model={resolvedModel} theme={theme} />
           {data.status === "running" ? (
             <Text style={{ color: theme.colors.accent, fontSize: 11 }}>运行中…</Text>
           ) : data.status === "failed" ? (
@@ -751,13 +758,6 @@ export function AgyToolCard({
         </Pressable>
 
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          {canExpand ? (
-            <Pressable onPress={handleToggle}>
-              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-                {expanded ? "收起" : "详情"}
-              </Text>
-            </Pressable>
-          ) : null}
           {consoleAction ? (
             <Pressable onPress={consoleAction.onPress}>
               <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "500" }}>
@@ -766,17 +766,21 @@ export function AgyToolCard({
             </Pressable>
           ) : null}
           {timeLabel ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10, fontFamily: "monospace" }}>
-              {timeLabel}
-            </Text>
+            <Pressable disabled={!canExpand} onPress={handleToggle}>
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10, fontFamily: "monospace" }}>
+                {timeLabel}
+              </Text>
+            </Pressable>
           ) : null}
         </View>
       </View>
 
-      {data.subline && !expanded ? (
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={1}>
-          {data.subline}
-        </Text>
+      {enrichedSubline && !expanded ? (
+        <Pressable disabled={!canExpand} onPress={handleToggle} style={{ width: "100%" }}>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={1}>
+            {enrichedSubline}
+          </Text>
+        </Pressable>
       ) : null}
 
       {expanded ? (
@@ -815,18 +819,7 @@ export function AgyToolCard({
                           <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
                             #{post.seq} {post.agent}
                           </Text>
-                          {postModel ? (
-                            <Text
-                              style={{
-                                color: theme.colors.foregroundMuted,
-                                fontSize: 10,
-                                fontFamily: "monospace",
-                              }}
-                              numberOfLines={1}
-                            >
-                              {postModel}
-                            </Text>
-                          ) : null}
+                          <ModelEffortBadge model={postModel} theme={theme} compact />
                         </View>
                         {post.time ? (
                           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>

@@ -5,11 +5,13 @@ import {
   clearAllStatuses,
   consumeConsoleNavRequest,
   formatLocalTimestamp,
+  formatModelAndEffortText,
   formatModelBadgeLabel,
   getChildTranscriptCache,
   getConsoleNavRequest,
   getStatusSnapshot,
   openConsoleForAgent,
+  parseModelAndEffort,
   refreshAgentStatus,
   registerAgentWorkspace,
   replaceAllStatuses,
@@ -347,6 +349,29 @@ test("resolveMemberModelFromStatus and resolveSubagentModelFromStatus resolve ex
   assert.equal(formatModelBadgeLabel("inherit"), null);
   assert.equal(formatModelBadgeLabel("default"), null);
   assert.equal(formatModelBadgeLabel(" claude-opus-5-5-high "), "claude-opus-5-5-high");
+
+  assert.deepEqual(parseModelAndEffort("gemini-4-carbon-medium"), {
+    modelId: "gemini-4-carbon",
+    effort: "Medium",
+    raw: "gemini-4-carbon-medium",
+  });
+  assert.deepEqual(parseModelAndEffort("gemini-4-neon-xhigh"), {
+    modelId: "gemini-4-neon",
+    effort: "XHigh",
+    raw: "gemini-4-neon-xhigh",
+  });
+  assert.deepEqual(parseModelAndEffort("Gemini 4 Carbon (High)"), {
+    modelId: "Gemini 4 Carbon",
+    effort: "High",
+    raw: "Gemini 4 Carbon (High)",
+  });
+  assert.deepEqual(parseModelAndEffort("gemini-flash-worker-agy"), {
+    modelId: "gemini-flash-worker-agy",
+    effort: null,
+    raw: "gemini-flash-worker-agy",
+  });
+  assert.equal(formatModelAndEffortText("claude-opus-5-5-high"), "claude-opus-5-5 · High");
+  assert.equal(parseModelAndEffort("inherit"), null);
 
   const status = {
     agentId: "a-models",

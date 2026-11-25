@@ -10,10 +10,11 @@ import type {
   SwarmSendMode,
 } from "../shared/rpc.ts";
 import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
+import { ModelEffortBadge } from "./model-badge.tsx";
 import {
   fetchConsoleSnapshot,
   formatLocalTimestamp,
-  formatModelBadgeLabel,
+  formatModelAndEffortText,
   getStatusSnapshot,
   openConsoleForAgent,
   refreshAgentStatus,
@@ -270,30 +271,7 @@ function StatusContent({
                       协调者
                     </Text>
                   </View>
-                  {formatModelBadgeLabel(status.coordinator?.model) ? (
-                    <View
-                      style={{
-                        backgroundColor: theme.colors.surface2,
-                        borderColor: theme.colors.border,
-                        borderWidth: 1,
-                        borderRadius: 4,
-                        paddingHorizontal: 5,
-                        paddingVertical: 1,
-                        maxWidth: 165,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          color: theme.colors.foregroundMuted,
-                          fontSize: 9,
-                          fontFamily: "monospace",
-                        }}
-                        numberOfLines={1}
-                      >
-                        {formatModelBadgeLabel(status.coordinator?.model)}
-                      </Text>
-                    </View>
-                  ) : null}
+                  <ModelEffortBadge model={status.coordinator?.model} theme={theme} compact />
                   {pendingInboxCount > 0 ? (
                     <View
                       style={{
@@ -379,7 +357,7 @@ function StatusContent({
                       当前活跃成员（{liveMembers.length}）
                     </Text>
                     {liveMembers.slice(0, 4).map((m) => {
-                      const mModel = resolveMemberModelFromStatus(status, m.name);
+                      const mModel = formatModelAndEffortText(resolveMemberModelFromStatus(status, m.name));
                       return (
                         <Text key={`dg-${m.name}`} style={{ color: theme.colors.foreground, fontSize: 10 }} numberOfLines={1}>
                           • @{m.name}{mModel ? ` [${mModel}]` : ""}（{m.state === "working" ? "运行中" : "待命"}）：{m.lastActivity ?? "处理中"}
@@ -670,30 +648,7 @@ function StatusContent({
                         <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }} numberOfLines={1}>
                           @{member.name}
                         </Text>
-                        {memberModel ? (
-                          <View
-                            style={{
-                              backgroundColor: theme.colors.surface2,
-                              borderColor: theme.colors.border,
-                              borderWidth: 1,
-                              borderRadius: 4,
-                              paddingHorizontal: 4,
-                              paddingVertical: 0.5,
-                              maxWidth: 165,
-                            }}
-                          >
-                            <Text
-                              style={{
-                                color: theme.colors.foregroundMuted,
-                                fontSize: 9,
-                                fontFamily: "monospace",
-                              }}
-                              numberOfLines={1}
-                            >
-                              {memberModel}
-                            </Text>
-                          </View>
-                        ) : null}
+                        <ModelEffortBadge model={memberModel} theme={theme} compact />
                         {member.stepProgress ? (
                           <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
                             {member.stepProgress.done}/{member.stepProgress.total}步
@@ -769,18 +724,7 @@ function StatusContent({
                       <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
                         {node.role}{dur ? ` (${dur})` : ""}
                       </Text>
-                      {formatModelBadgeLabel(node.model) ? (
-                        <Text
-                          style={{
-                            color: theme.colors.foregroundMuted,
-                            fontSize: 9,
-                            fontFamily: "monospace",
-                          }}
-                          numberOfLines={1}
-                        >
-                          {formatModelBadgeLabel(node.model)}
-                        </Text>
-                      ) : null}
+                      <ModelEffortBadge model={node.model} theme={theme} compact />
                     </View>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                       <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
@@ -832,18 +776,7 @@ function StatusContent({
                     <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
                       {sub.role} ({sub.typeName})
                     </Text>
-                    {formatModelBadgeLabel(sub.model) ? (
-                      <Text
-                        style={{
-                          color: theme.colors.foregroundMuted,
-                          fontSize: 9,
-                          fontFamily: "monospace",
-                        }}
-                        numberOfLines={1}
-                      >
-                        {formatModelBadgeLabel(sub.model)}
-                      </Text>
-                    ) : null}
+                    <ModelEffortBadge model={sub.model} theme={theme} compact />
                   </View>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                     <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>

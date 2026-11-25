@@ -1766,6 +1766,12 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
   }
 
   const coordinatorRecent = summarizeRecentActivity(rows);
+  const coordinatorRosterModel =
+    typeof rawSwarm?.members?.coordinator?.model === "string" &&
+    rawSwarm.members.coordinator.model.trim().length > 0
+      ? rawSwarm.members.coordinator.model.trim()
+      : null;
+  const coordinatorModel = coordinatorRecent.model ?? coordinatorRosterModel;
   let pendingInboxCount = 0;
   try {
     const inboxRaw = readFileSync(path.join(bdir, "logs", "paseo-inbox.jsonl"), "utf8");
@@ -1788,7 +1794,7 @@ export function inspectAgySession(input: InspectAgySessionInput): AgentBgStatus 
     coordinatorState,
     coordinator: {
       conversationId: sessionId,
-      model: coordinatorRecent.model,
+      model: coordinatorModel,
       lastActivity: coordinatorRecent.lastActivity,
       stepCount: rows.length,
     },

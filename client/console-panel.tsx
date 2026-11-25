@@ -33,6 +33,7 @@ import {
 import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
 import { RichMarkdown } from "./markdown.tsx";
 import { clipMarkdownPreview } from "./markdown-normalize.ts";
+import { ModelEffortBadge } from "./model-badge.tsx";
 import {
   applyChildTranscriptResponse,
   consumeConsoleNavRequest,
@@ -360,30 +361,7 @@ function MemberRow({
           <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }} numberOfLines={1}>
             @{member.name}
           </Text>
-          {modelLabel ? (
-            <View
-              style={{
-                backgroundColor: theme.colors.surface1,
-                borderColor: theme.colors.border,
-                borderWidth: 1,
-                borderRadius: 4,
-                paddingHorizontal: 5,
-                paddingVertical: 1,
-                maxWidth: 190,
-              }}
-            >
-              <Text
-                style={{
-                  color: theme.colors.foregroundMuted,
-                  fontSize: 10,
-                  fontFamily: "monospace",
-                }}
-                numberOfLines={1}
-              >
-                {modelLabel}
-              </Text>
-            </View>
-          ) : null}
+          <ModelEffortBadge model={modelLabel} theme={theme} />
           {member.stepProgress ? (
             <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
               {member.stepProgress.done}/{member.stepProgress.total}步
@@ -468,30 +446,7 @@ function BoardPostRow({
             #{post.seq}
           </Text>
           <Text style={{ color: agentColor, fontSize: 12, fontWeight: "700" }}>{post.agent}</Text>
-          {model ? (
-            <View
-              style={{
-                backgroundColor: theme.colors.surface2,
-                borderColor: theme.colors.border,
-                borderWidth: 1,
-                borderRadius: 4,
-                paddingHorizontal: 5,
-                paddingVertical: 1,
-                maxWidth: 180,
-              }}
-            >
-              <Text
-                style={{
-                  color: theme.colors.foregroundMuted,
-                  fontSize: 10,
-                  fontFamily: "monospace",
-                }}
-                numberOfLines={1}
-              >
-                {model}
-              </Text>
-            </View>
-          ) : null}
+          <ModelEffortBadge model={model} theme={theme} />
           {post.mentions.map((m) => (
             <View
               key={m}
@@ -2352,30 +2307,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                         协调者
                       </Text>
                     </View>
-                    {formatModelBadgeLabel(status.coordinator?.model) ? (
-                      <View
-                        style={{
-                          backgroundColor: theme.colors.surface2,
-                          borderColor: theme.colors.border,
-                          borderWidth: 1,
-                          borderRadius: 4,
-                          paddingHorizontal: 5,
-                          paddingVertical: 1,
-                          maxWidth: 190,
-                        }}
-                      >
-                        <Text
-                          style={{
-                            color: theme.colors.foregroundMuted,
-                            fontSize: 10,
-                            fontFamily: "monospace",
-                          }}
-                          numberOfLines={1}
-                        >
-                          {formatModelBadgeLabel(status.coordinator?.model)}
-                        </Text>
-                      </View>
-                    ) : null}
+                    <ModelEffortBadge model={status.coordinator?.model} theme={theme} />
                     <Text
                       style={{
                         color:

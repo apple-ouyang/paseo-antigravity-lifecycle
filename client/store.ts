@@ -43,6 +43,21 @@ export type ConsoleNavTarget =
   | { kind: "member_by_name"; memberName: string }
   | { kind: "subagent_by_ref"; id?: string | null; role?: string | null };
 
+export interface ParsedModelEffort {
+  modelId: string;
+  effort: string | null;
+  raw: string;
+}
+
+const EFFORT_LABELS: Record<string, string> = {
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "XHigh",
+  max: "Max",
+};
+
 export function formatModelBadgeLabel(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
@@ -50,6 +65,35 @@ export function formatModelBadgeLabel(raw: string | null | undefined): string | 
   const lower = trimmed.toLowerCase();
   if (lower === "inherit" || lower === "default" || lower === "auto") return null;
   return trimmed;
+}
+
+export function parseModelAndEffort(raw: string | null | undefined): ParsedModelEffort | null {
+  const clean = formatModelBadgeLabel(raw);
+  if (!clean) return null;
+
+  // Format 1: Display label with parenthesized effort, e.g. "Gemini 4 Carbon (Medium)"
+  const parenMatch = /^(.+?)\s*\((minimal|low|medium|high|xhigh|max)\)$/i.exec(clean);
+  if (parenMatch) {
+    const modelId = parenMatch[1].trim();
+    const effort = EFFORT_LABELS[parenMatch[2].toLowerCase()] ?? parenMatch[2];
+    if (modelId) return { modelId, effort, raw: clean };
+  }
+
+  // Format 2: Model ID with trailing effort suffix, e.g. "gemini-4-carbon-medium", "claude-opus-5-5-high"
+  const suffixMatch = /^(.+?)[-_](minimal|low|medium|high|xhigh|max)$/i.exec(clean);
+  if (suffixMatch) {
+    const modelId = suffixMatch[1].trim();
+    const effort = EFFORT_LABELS[suffixMatch[2].toLowerCase()] ?? suffixMatch[2];
+    if (modelId) return { modelId, effort, raw: clean };
+  }
+
+  return { modelId: clean, effort: null, raw: clean };
+}
+
+export function formatModelAndEffortText(raw: string | null | undefined): string | null {
+  const parsed = parseModelAndEffort(raw);
+  if (!parsed) return null;
+  return parsed.effort ? `${parsed.modelId} · ${parsed.effort}` : parsed.modelId;
 }
 
 export function resolveMemberModelFromStatus(

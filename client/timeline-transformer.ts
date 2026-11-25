@@ -224,14 +224,15 @@ function buildCardData(
 
       if (action === "add") {
         const countTag = tasks ? ` ×${tasks}` : n && n > 1 ? ` ×${n}` : "";
-        const metaParts = [workspace, model].filter(Boolean);
+        const wsLabel = workspace && workspace !== "inherit" ? workspace : null;
+        const metaParts = [wsLabel, model && model !== "inherit" ? model : null].filter(Boolean);
         return {
           toolKey,
           category: "swarm_action",
           status,
           badge: "Swarm 派人",
           headline: `添加 ${name ?? "worker"}${countTag}`,
-          subline: metaParts.length > 0 ? metaParts.join(" · ") : brief ? clipOneLine(brief, 76) : null,
+          subline: metaParts.length > 0 ? metaParts.join(" · ") : brief ? clipOneLine(brief, 84) : null,
           accent: "success",
           body: brief ? brief.slice(0, 4000) : null,
           mentions: name ? [name] : [],
