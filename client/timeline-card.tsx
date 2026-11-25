@@ -507,21 +507,12 @@ export function AgyToolCard({
   }, [agentId, liveStatus]);
 
   const resolvedModel = useMemo(() => {
+    // Only show header model badge on member-scoped lifecycle actions & subagents
+    // (never repeat coordinator's own model on swarm_wait/read_board, or duplicate on swarm_post).
     if (data.targetMember) {
       return resolveMemberModelFromStatus(liveStatus, data.targetMember, data.model);
     }
-    if (data.category === "swarm_post") {
-      const concreteMentions = data.mentions.filter((m) => m !== "coordinator" && m !== "all");
-      if (concreteMentions.length === 1) {
-        return resolveMemberModelFromStatus(liveStatus, concreteMentions[0], data.model);
-      }
-      return resolveMemberModelFromStatus(liveStatus, "coordinator", data.model);
-    }
-    if (
-      data.category === "swarm_action" ||
-      data.category === "swarm_read" ||
-      data.category === "swarm_wait"
-    ) {
+    if (data.category === "swarm_action" && data.badge === "Swarm 派人") {
       return formatModelBadgeLabel(data.model) ?? formatModelBadgeLabel(liveStatus?.coordinator?.model);
     }
     if (data.category === "subagent_invoke" || data.category === "subagent_message") {
@@ -534,16 +525,21 @@ export function AgyToolCard({
         data.model,
       );
     }
-    return formatModelBadgeLabel(data.model);
+    return null;
   }, [liveStatus, data]);
 
   const enrichedSubline = useMemo(() => {
-    if (data.category === "swarm_post" && data.mentions.length > 0 && liveStatus) {
-      const parts = data.mentions.map((m) => {
-        const mText = formatModelAndEffortText(resolveMemberModelFromStatus(liveStatus, m));
+    if (data.category === "swarm_post" && data.mentions.length > 0) {
+      // Filter out self-mention `@coordinator` when concrete worker recipients exist
+      const concrete = data.mentions.filter((m) => m.toLowerCase() !== "coordinator");
+      const targets = concrete.length > 0 ? concrete : data.mentions;
+      const parts = targets.map((m) => {
+        const mText = liveStatus
+          ? formatModelAndEffortText(resolveMemberModelFromStatus(liveStatus, m))
+          : null;
         return mText ? `@${m} (${mText})` : `@${m}`;
       });
-      return `提及 ${parts.join(" · ")}`;
+      return `→ ${parts.join(" · ")}`;
     }
     return data.subline;
   }, [data, liveStatus]);
