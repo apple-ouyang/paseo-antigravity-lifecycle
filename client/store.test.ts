@@ -7,11 +7,15 @@ import {
   formatLocalTimestamp,
   formatModelAndEffortText,
   formatModelBadgeLabel,
+  getAgentLastTurnEndedAt,
+  getAgentRuntimeStatus,
   getChildTranscriptCache,
   getConsoleNavRequest,
+  getQuestionAnswerRecord,
   getStatusSnapshot,
   openConsoleForAgent,
   parseModelAndEffort,
+  recordQuestionAnswerByCallId,
   refreshAgentStatus,
   registerAgentWorkspace,
   replaceAllStatuses,
@@ -21,10 +25,14 @@ import {
   resolveSubagentChildFromStatus,
   resolveSubagentModelFromStatus,
   sendSwarmMessage,
+  setAgentRuntimeStatus,
   setOpenConsoleHandler,
   setRefreshAgentStatusHandler,
   setSendSwarmMessageHandler,
+  setSubmittedQuestionAnswer,
+  subscribeAgentRuntimeStatus,
   subscribeConsoleNav,
+  subscribeQuestionAnswers,
   subscribeStatus,
   unregisterAgentWorkspace,
   upsertAgentStatus,
@@ -436,4 +444,50 @@ test("resolveMemberModelFromStatus and resolveSubagentModelFromStatus resolve ex
   assert.equal(resolveSubagentModelFromStatus(status, { id: "sub-1" }), "claude-opus-5-5-high");
   assert.equal(resolveSubagentModelFromStatus(status, { role: "Verifier" }), "claude-opus-5-5-high");
   assert.equal(resolveSubagentModelFromStatus(status, { role: "Unknown" }, "inherit"), "gemini-4-neon-high");
+});
+
+test("question answer store notifies asynchronously by callId and tracks per-agent turn completion", async () => {
+  clearAllStatuses();
+  let qNotifies = 0;
+  let rNotifies = 0;
+  const unsubQ = subscribeQuestionAnswers(() => {
+    qNotifies += 1;
+  });
+  const unsubR = subscribeAgentRuntimeStatus(() => {
+    rNotifies += 1;
+  });
+
+  try {
+    setSubmittedQuestionAnswer("agent-a:call-1:q", "我选择：[2]", "call-1");
+    assert.equal(getQuestionAnswerRecord("agent-a:call-1:q", "call-1")?.answer, "我选择：[2]");
+    assert.equal(getQuestionAnswerRecord("other-key", "call-1")?.answer, "我选择：[2]");
+    assert.equal(getQuestionAnswerRecord("other-key", "call-1")?.awaitingReply, true);
+
+    // Notification is microtask-batched so calls inside render/transform never trigger sync React warnings
+    assert.equal(qNotifies, 0);
+    await Promise.resolve();
+    assert.equal(qNotifies, 1);
+
+    // Recording same answer again is a no-op
+    recordQuestionAnswerByCallId("call-1", "我选择：[2]", { live: true });
+    await Promise.resolve();
+    assert.equal(qNotifies, 1);
+
+    // Agent runtime status tracks per-agent running -> idle transition independently
+    setAgentRuntimeStatus("agent-a", "running");
+    setAgentRuntimeStatus("agent-b", "running");
+    assert.equal(getAgentRuntimeStatus("agent-a"), "running");
+    assert.equal(getAgentLastTurnEndedAt("agent-a"), null);
+
+    setAgentRuntimeStatus("agent-a", "idle");
+    assert.equal(getAgentRuntimeStatus("agent-a"), "idle");
+    assert.ok(getAgentLastTurnEndedAt("agent-a") !== null);
+    assert.equal(getAgentRuntimeStatus("agent-b"), "running");
+    assert.equal(getAgentLastTurnEndedAt("agent-b"), null);
+    assert.ok(rNotifies >= 3);
+  } finally {
+    unsubQ();
+    unsubR();
+    clearAllStatuses();
+  }
 });

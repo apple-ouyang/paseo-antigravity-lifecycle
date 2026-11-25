@@ -224,12 +224,26 @@ let navSeq = 0;
 const pendingNavs = new Map<string, ConsoleNavRequest>();
 const navListeners = new Set<() => void>();
 
+export interface QuestionAnswerRecord {
+  answer: string;
+  awaitingReply: boolean;
+  answeredAt: number;
+}
+
 const childTranscriptCache = new Map<string, ChildTranscriptCacheEntry>();
 const childStepDetailCache = new Map<string, { detail: ChildStepDetail; updatedAt: number }>();
 const consoleDetailCache = new Map<string, { detail: AgyConsoleDetail; updatedAt: number }>();
-const submittedQuestionAnswers = new Map<string, string>();
+const submittedQuestionAnswers = new Map<string, QuestionAnswerRecord>();
+const questionAnswersByCallId = new Map<string, QuestionAnswerRecord>();
+const questionAnswerListeners = new Set<() => void>();
+let questionNotifyScheduled = false;
+
+const agentRuntimeStatuses = new Map<string, string>();
+const agentLastTurnEndedAt = new Map<string, number>();
+const runtimeStatusListeners = new Set<() => void>();
 
 const MAX_STEP_DETAIL_CACHE = 160;
+const MAX_QUESTION_ANSWER_CACHE = 160;
 
 export function getChildStepDetailCache(
   conversationId: string,
@@ -248,16 +262,138 @@ export function setChildStepDetailCache(detail: ChildStepDetail): void {
   evictOldest(childStepDetailCache, MAX_STEP_DETAIL_CACHE);
 }
 
-export function getSubmittedQuestionAnswer(key: string): string | null {
-  return submittedQuestionAnswers.get(key) ?? null;
+function scheduleQuestionAnswerNotify(): void {
+  if (questionNotifyScheduled || questionAnswerListeners.size === 0) return;
+  questionNotifyScheduled = true;
+  queueMicrotask(() => {
+    questionNotifyScheduled = false;
+    for (const listener of questionAnswerListeners) {
+      listener();
+    }
+  });
 }
 
-export function setSubmittedQuestionAnswer(key: string, answer: string): void {
-  submittedQuestionAnswers.set(key, answer);
-  if (submittedQuestionAnswers.size > 120) {
-    const first = submittedQuestionAnswers.keys().next().value;
-    if (first) submittedQuestionAnswers.delete(first);
+function trimAnswerMap(map: Map<string, QuestionAnswerRecord>): void {
+  while (map.size > MAX_QUESTION_ANSWER_CACHE) {
+    const first = map.keys().next().value;
+    if (!first) break;
+    map.delete(first);
   }
+}
+
+export function getSubmittedQuestionAnswer(key: string): string | null {
+  return submittedQuestionAnswers.get(key)?.answer ?? null;
+}
+
+export function getQuestionAnswerRecord(
+  answerKey: string,
+  callId?: string | null,
+): QuestionAnswerRecord | null {
+  if (callId) {
+    const byCall = questionAnswersByCallId.get(callId);
+    if (byCall) return byCall;
+  }
+  return submittedQuestionAnswers.get(answerKey) ?? null;
+}
+
+export function setSubmittedQuestionAnswer(
+  key: string,
+  answer: string,
+  callId?: string | null,
+): void {
+  const record: QuestionAnswerRecord = {
+    answer,
+    awaitingReply: true,
+    answeredAt: Date.now(),
+  };
+  submittedQuestionAnswers.set(key, record);
+  trimAnswerMap(submittedQuestionAnswers);
+  if (callId) {
+    questionAnswersByCallId.set(callId, record);
+    trimAnswerMap(questionAnswersByCallId);
+  }
+  scheduleQuestionAnswerNotify();
+}
+
+export function recordQuestionAnswerByCallId(
+  callId: string,
+  answer: string,
+  options?: { live?: boolean },
+): void {
+  if (!callId || !answer) return;
+  const live = Boolean(options?.live);
+  const existing = questionAnswersByCallId.get(callId);
+  if (existing && existing.answer === answer && (!live || existing.awaitingReply)) {
+    return;
+  }
+  const next: QuestionAnswerRecord = {
+    answer,
+    awaitingReply: live ? true : (existing?.awaitingReply ?? false),
+    answeredAt: existing?.answeredAt ?? Date.now(),
+  };
+  questionAnswersByCallId.set(callId, next);
+  trimAnswerMap(questionAnswersByCallId);
+  scheduleQuestionAnswerNotify();
+}
+
+export function subscribeQuestionAnswers(listener: () => void): () => void {
+  questionAnswerListeners.add(listener);
+  return () => {
+    questionAnswerListeners.delete(listener);
+  };
+}
+
+export function clearAwaitingQuestionReplies(): void {
+  let changed = false;
+  for (const [key, rec] of submittedQuestionAnswers) {
+    if (rec.awaitingReply) {
+      submittedQuestionAnswers.set(key, { ...rec, awaitingReply: false });
+      changed = true;
+    }
+  }
+  for (const [cid, rec] of questionAnswersByCallId) {
+    if (rec.awaitingReply) {
+      questionAnswersByCallId.set(cid, { ...rec, awaitingReply: false });
+      changed = true;
+    }
+  }
+  if (changed) {
+    scheduleQuestionAnswerNotify();
+  }
+}
+
+export function setAgentRuntimeStatus(agentId: string, status: string | null): void {
+  if (!agentId) return;
+  const prev = agentRuntimeStatuses.get(agentId) ?? null;
+  if (status === null) {
+    if (!agentRuntimeStatuses.has(agentId)) return;
+    agentRuntimeStatuses.delete(agentId);
+    agentLastTurnEndedAt.delete(agentId);
+  } else {
+    if (prev === status) return;
+    agentRuntimeStatuses.set(agentId, status);
+  }
+  if (prev === "running" && status !== "running") {
+    agentLastTurnEndedAt.set(agentId, Date.now());
+  }
+  for (const listener of runtimeStatusListeners) {
+    listener();
+  }
+}
+
+export function getAgentRuntimeStatus(agentId: string): string | null {
+  return agentRuntimeStatuses.get(agentId) ?? null;
+}
+
+export function getAgentLastTurnEndedAt(agentId: string): number | null {
+  return agentLastTurnEndedAt.get(agentId) ?? null;
+}
+
+export function subscribeAgentRuntimeStatus(listener: () => void): () => void {
+  runtimeStatusListeners.add(listener);
+  return () => {
+    runtimeStatusListeners.delete(listener);
+  };
 }
 
 function notifyNavListeners(): void {
@@ -426,6 +562,10 @@ export function clearAllStatuses(): void {
   childTranscriptCache.clear();
   childStepDetailCache.clear();
   consoleDetailCache.clear();
+  submittedQuestionAnswers.clear();
+  questionAnswersByCallId.clear();
+  agentRuntimeStatuses.clear();
+  agentLastTurnEndedAt.clear();
   if (Object.keys(statuses).length === 0) return;
   statuses = {};
   for (const listener of listeners) {

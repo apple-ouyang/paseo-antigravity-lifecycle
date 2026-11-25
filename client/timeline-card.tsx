@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { usePaseo, useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
@@ -11,8 +11,10 @@ import {
   formatLocalTimestamp,
   formatModelAndEffortText,
   formatModelBadgeLabel,
+  getAgentLastTurnEndedAt,
+  getAgentRuntimeStatus,
+  getQuestionAnswerRecord,
   getStatusSnapshot,
-  getSubmittedQuestionAnswer,
   openConsoleForAgent,
   refreshAgentStatus,
   resolveMemberChildFromStatus,
@@ -20,6 +22,8 @@ import {
   resolveSubagentChildFromStatus,
   resolveSubagentModelFromStatus,
   setSubmittedQuestionAnswer,
+  subscribeAgentRuntimeStatus,
+  subscribeQuestionAnswers,
   subscribeStatus,
 } from "./store.ts";
 
@@ -77,14 +81,58 @@ function AgyQuestionCard({
   const paseo = usePaseo();
   const questions = data.questions ?? [];
   const answerKey = `${agentId}:${data.callId ?? data.headline}:${questions.map((q) => q.question).join("|")}`;
-  const persistedAnswer = getSubmittedQuestionAnswer(answerKey);
-  const initialAnswer = data.questionAnswer ?? persistedAnswer ?? null;
+  const storedRecord = useSyncExternalStore(
+    subscribeQuestionAnswers,
+    () => getQuestionAnswerRecord(answerKey, data.callId),
+    () => getQuestionAnswerRecord(answerKey, data.callId),
+  );
+  const agentRuntimeStatus = useSyncExternalStore(
+    subscribeAgentRuntimeStatus,
+    () => getAgentRuntimeStatus(agentId),
+    () => getAgentRuntimeStatus(agentId),
+  );
+  const lastTurnEndedAt = useSyncExternalStore(
+    subscribeAgentRuntimeStatus,
+    () => getAgentLastTurnEndedAt(agentId),
+    () => getAgentLastTurnEndedAt(agentId),
+  );
 
-  const [submittedAnswer, setSubmittedAnswer] = useState<string | null>(initialAnswer);
-  const effectiveAnswer = data.questionAnswer ?? submittedAnswer;
+  const [submittedAnswer, setSubmittedAnswer] = useState<string | null>(
+    () => data.questionAnswer ?? storedRecord?.answer ?? null,
+  );
+  const effectiveAnswer = data.questionAnswer ?? storedRecord?.answer ?? submittedAnswer;
   const isAnswered = Boolean(effectiveAnswer);
 
   const [collapsed, setCollapsed] = useState<boolean>(isAnswered);
+  const prevAnsweredRef = useRef<boolean>(isAnswered);
+  useEffect(() => {
+    if (!prevAnsweredRef.current && isAnswered) {
+      setCollapsed(true);
+    }
+    prevAnsweredRef.current = isAnswered;
+  }, [isAnswered]);
+
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const turnFinishedAfterAnswer = Boolean(
+    storedRecord && lastTurnEndedAt !== null && lastTurnEndedAt >= storedRecord.answeredAt,
+  );
+  const isAwaitingModel = Boolean(
+    isAnswered &&
+      storedRecord?.awaitingReply &&
+      !turnFinishedAfterAnswer &&
+      (agentRuntimeStatus === "running" || nowMs - storedRecord.answeredAt < 4_000),
+  );
+  useEffect(() => {
+    if (!isAwaitingModel) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [isAwaitingModel]);
+  const waitingSeconds =
+    isAwaitingModel && storedRecord
+      ? Math.max(0, Math.floor((nowMs - storedRecord.answeredAt) / 1_000))
+      : 0;
+
   const [selectedByQ, setSelectedByQ] = useState<Record<number, number[]>>({});
   const [otherByQ, setOtherByQ] = useState<Record<number, string>>({});
   const [sending, setSending] = useState(false);
@@ -143,7 +191,7 @@ function AgyQuestionCard({
     try {
       await paseo.agents.ref(agentId).send(payload);
       const compactSummary = payload.replace(/\s+/g, " ").trim();
-      setSubmittedQuestionAnswer(answerKey, compactSummary);
+      setSubmittedQuestionAnswer(answerKey, compactSummary, data.callId);
       setSubmittedAnswer(compactSummary);
       setCollapsed(true);
     } catch (err) {
@@ -202,12 +250,20 @@ function AgyQuestionCard({
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <Text
             style={{
-              color: isAnswered ? theme.colors.statusSuccess : theme.colors.statusWarning,
+              color: isAwaitingModel
+                ? theme.colors.accent
+                : isAnswered
+                  ? theme.colors.statusSuccess
+                  : theme.colors.statusWarning,
               fontSize: 11,
               fontWeight: "600",
             }}
           >
-            {isAnswered ? "✓ 已回复" : "待选择"}
+            {isAwaitingModel
+              ? `✓ 已送达 · 模型思考中${waitingSeconds > 0 ? ` ${waitingSeconds}s` : "…"}`
+              : isAnswered
+                ? "✓ 已回复"
+                : "待选择"}
           </Text>
           <Pressable onPress={() => setCollapsed((v) => !v)}>
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
@@ -223,9 +279,16 @@ function AgyQuestionCard({
       </View>
 
       {isAnswered && collapsed && effectiveAnswer ? (
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={2}>
-          {effectiveAnswer}
-        </Text>
+        <View style={{ gap: 2 }}>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={2}>
+            {effectiveAnswer}
+          </Text>
+          {isAwaitingModel ? (
+            <Text style={{ color: theme.colors.accent, fontSize: 10 }}>
+              已收到你的选择，长上下文首字可能需要 15–30 秒，无需重复发送
+            </Text>
+          ) : null}
+        </View>
       ) : null}
 
       {!collapsed ? (

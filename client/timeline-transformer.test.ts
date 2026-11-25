@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgyToolCardSchema } from "../shared/timeline.ts";
+import { clearAllStatuses, getQuestionAnswerRecord } from "./store.ts";
 import {
+  resetQuestionTransformerState,
   transformAgyOtherToolCall,
   transformAgyQuestionFallback,
 } from "./timeline-transformer.ts";
@@ -217,4 +219,146 @@ test("transformAgyOtherToolCall parses ask_question options (array and JSON stri
   assert.equal(parsedAns.badge, "单选确认");
   assert.equal(parsedAns.accent, "success");
   assert.equal(parsedAns.questionAnswer, "A1: 方案 A");
+});
+
+test("cross-turn ask_question deduplicates follow-up receipt card, syncs answer by callId, and survives plugin reload", () => {
+  clearAllStatuses();
+  resetQuestionTransformerState();
+
+  const questionInput = {
+    questions: [
+      {
+        question: "下一步如何推进论文整改与官网同步？",
+        is_multi_select: false,
+        options: ["(Recommended) 方案 1", "方案 2"],
+      },
+    ],
+  };
+
+  try {
+    // 1. Turn 1 completes with unanswered ask_question (call_cross_1)
+    const turn1 = transformAgyOtherToolCall({
+      item: {
+        type: "tool_call",
+        callId: "call_cross_1",
+        name: "other",
+        status: "completed",
+        error: null,
+        detail: { type: "unknown", input: questionInput, output: null },
+        metadata: { kind: "other", title: "Run ask_question" },
+      },
+      phase: "complete",
+    });
+    assert.equal(turn1?.items.length, 1);
+
+    // 2. Turn 2 begins: transient streaming tool_call_update without output is suppressed
+    const turn2Pending = transformAgyOtherToolCall({
+      item: {
+        type: "tool_call",
+        callId: "call_cross_1",
+        name: "other",
+        status: "running",
+        error: null,
+        detail: { type: "unknown", input: questionInput, output: null },
+        metadata: { kind: "other", title: "Run ask_question" },
+      },
+      phase: "streaming",
+    });
+    assert.deepEqual(turn2Pending, { items: [] });
+
+    // 3. Turn 2 completes ask_question with output while model is still thinking:
+    //    duplicate receipt card is suppressed and answer syncs back to call_cross_1 as awaitingReply=true
+    const turn2AnsweredLive = transformAgyOtherToolCall({
+      item: {
+        type: "tool_call",
+        callId: "call_cross_1",
+        name: "other",
+        status: "completed",
+        error: null,
+        detail: {
+          type: "unknown",
+          input: questionInput,
+          output: "Created At: 2026-11-25T10:59:56+08:00\nCompleted At: 2026-11-25T11:01:10+08:00\nA1: 我选择：\n- [2] 方案 2",
+        },
+        metadata: { kind: "other", title: "Run ask_question" },
+      },
+      phase: "streaming",
+    });
+    assert.deepEqual(turn2AnsweredLive, { items: [] });
+    const liveRec = getQuestionAnswerRecord("agent-1:call_cross_1:q", "call_cross_1");
+    assert.ok(liveRec);
+    assert.equal(liveRec.answer, "A1: 我选择：\n- [2] 方案 2");
+    assert.equal(liveRec.awaitingReply, true);
+
+    // 4. Simulate plugin hot-reload while history tail is replayed chronologically:
+    //    Turn 1 card still renders, Turn 2 receipt stays suppressed, and Turn 1 card immediately reads synced answer
+    clearAllStatuses();
+    resetQuestionTransformerState();
+    const replay1 = transformAgyOtherToolCall({
+      item: {
+        type: "tool_call",
+        callId: "call_cross_1",
+        name: "other",
+        status: "completed",
+        error: null,
+        detail: { type: "unknown", input: questionInput, output: null },
+        metadata: { kind: "other", title: "Run ask_question" },
+      },
+      phase: "complete",
+    });
+    const replay2 = transformAgyOtherToolCall({
+      item: {
+        type: "tool_call",
+        callId: "call_cross_1",
+        name: "other",
+        status: "completed",
+        error: null,
+        detail: {
+          type: "unknown",
+          input: questionInput,
+          output: "A1: 我选择：\n- [2] 方案 2",
+        },
+        metadata: { kind: "other", title: "Run ask_question" },
+      },
+      phase: "complete",
+    });
+    assert.equal(replay1?.items.length, 1);
+    assert.deepEqual(replay2, { items: [] });
+    const replayedRec = getQuestionAnswerRecord("agent-1:call_cross_1:q", "call_cross_1");
+    assert.ok(replayedRec);
+    assert.equal(replayedRec.answer, "A1: 我选择：\n- [2] 方案 2");
+    assert.equal(replayedRec.awaitingReply, false);
+
+    // 5. Single-turn in-place update (streaming without output -> complete with output) is NOT suppressed
+    const inPlaceStream = transformAgyOtherToolCall({
+      item: {
+        type: "tool_call",
+        callId: "call_single_1",
+        name: "other",
+        status: "running",
+        error: null,
+        detail: { type: "unknown", input: questionInput, output: null },
+        metadata: { kind: "other", title: "Run ask_question" },
+      },
+      phase: "streaming",
+    });
+    const inPlaceDone = transformAgyOtherToolCall({
+      item: {
+        type: "tool_call",
+        callId: "call_single_1",
+        name: "other",
+        status: "completed",
+        error: null,
+        detail: { type: "unknown", input: questionInput, output: "A1: 方案 1" },
+        metadata: { kind: "other", title: "Run ask_question" },
+      },
+      phase: "complete",
+    });
+    assert.equal(inPlaceStream?.items.length, 1);
+    assert.equal(inPlaceDone?.items.length, 1);
+    assert.equal(AgyToolCardSchema.parse(inPlaceDone?.items[0].data).questionAnswer, "A1: 方案 1");
+  } finally {
+    clearAllStatuses();
+    resetQuestionTransformerState();
+  }
 });

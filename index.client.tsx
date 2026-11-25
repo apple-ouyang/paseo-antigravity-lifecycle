@@ -12,6 +12,7 @@ import {
   getStatusSnapshot,
   registerAgentWorkspace,
   replaceAllStatuses,
+  setAgentRuntimeStatus,
   setFetchConsoleHandler,
   setOpenConsoleHandler,
   setRefreshAgentStatusHandler,
@@ -23,6 +24,7 @@ import {
 import { AgyToolCard } from "./client/timeline-card.tsx";
 import { formatDurationShort } from "./client/progress-bar.tsx";
 import {
+  resetQuestionTransformerState,
   transformAgyOtherToolCall,
   transformAgyQuestionFallback,
 } from "./client/timeline-transformer.ts";
@@ -212,6 +214,7 @@ export default function contribute(client: PluginClientContext) {
     pills.get(agentId)?.handle.remove();
     pills.delete(agentId);
     lastRefreshAt.delete(agentId);
+    setAgentRuntimeStatus(agentId, null);
     unregisterAgentWorkspace(agentId);
   };
 
@@ -330,6 +333,7 @@ export default function contribute(client: PluginClientContext) {
       return;
     }
     registerAgentWorkspace(agent.id, workspaceId);
+    setAgentRuntimeStatus(agent.id, agent.status);
     const existing = pills.get(agent.id);
     if (existing && existing.workspaceId === workspaceId) {
       syncPill(agent.id, existing);
@@ -431,6 +435,7 @@ export default function contribute(client: PluginClientContext) {
     setFetchConsoleHandler(null);
     for (const agentId of [...pills.keys()]) remove(agentId);
     clearAllStatuses();
+    resetQuestionTransformerState();
     await disposePanel?.();
     await disposeTransformer?.();
     await disposeQuestionFallback?.();

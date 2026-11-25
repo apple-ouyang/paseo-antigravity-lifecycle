@@ -1,11 +1,27 @@
 import type { PluginTimelineTransformerContribution } from "@getpaseo/plugin/client";
 import type { AgyQuestionItem, AgyToolCardData } from "../shared/timeline.ts";
+import { recordQuestionAnswerByCallId } from "./store.ts";
 
 type ToolCallTransformer = PluginTimelineTransformerContribution<"tool_call">["transform"];
 type AssistantMessageTransformer =
   PluginTimelineTransformerContribution<"assistant_message">["transform"];
 
 const seenQuestionSignatures = new Set<string>();
+const seenUnansweredQuestionCallIds = new Set<string>();
+
+export function resetQuestionTransformerState(): void {
+  seenQuestionSignatures.clear();
+  seenUnansweredQuestionCallIds.clear();
+}
+
+function recordSeenUnansweredQuestionCallId(callId: string): void {
+  if (!callId) return;
+  seenUnansweredQuestionCallIds.add(callId);
+  if (seenUnansweredQuestionCallIds.size > 120) {
+    const first = seenUnansweredQuestionCallIds.values().next().value;
+    if (first) seenUnansweredQuestionCallIds.delete(first);
+  }
+}
 
 function normalizeQuestionLine(line: string): string {
   return line.replace(/\s+/g, " ").trim();
@@ -623,7 +639,7 @@ function buildCardData(
   }
 }
 
-export const transformAgyOtherToolCall: ToolCallTransformer = ({ item }) => {
+export const transformAgyOtherToolCall: ToolCallTransformer = ({ item, phase }) => {
   const metaKind =
     isRecord(item.metadata) && typeof item.metadata.kind === "string"
       ? item.metadata.kind.toLowerCase()
@@ -646,6 +662,27 @@ export const transformAgyOtherToolCall: ToolCallTransformer = ({ item }) => {
   const rawInput = item.detail.type === "unknown" ? item.detail.input : null;
   const rawOutput = item.detail.type === "unknown" ? item.detail.output : null;
   const inputRec = isRecord(rawInput) ? rawInput : null;
+
+  if (toolKey === "ask_question" && item.callId) {
+    const questionAnswer = extractQuestionAnswer(rawOutput);
+    if (questionAnswer) {
+      recordQuestionAnswerByCallId(item.callId, questionAnswer, {
+        live: phase === "streaming",
+      });
+      // When agy acp completes ask_question on the follow-up user turn, Paseo emits a second
+      // timeline item with the same callId. Sync the answer back to the original card and hide
+      // this duplicate receipt card so the user never sees two cards for one question.
+      if (seenUnansweredQuestionCallIds.has(item.callId)) {
+        return { items: [] };
+      }
+    } else if (phase === "streaming" && seenUnansweredQuestionCallIds.has(item.callId)) {
+      // Suppress the transient in_progress tool_call_update on the follow-up turn before output arrives.
+      return { items: [] };
+    } else if (phase === "complete") {
+      recordSeenUnansweredQuestionCallId(item.callId);
+    }
+  }
+
   const data = buildCardData(toolKey, item.status, inputRec, rawInput, rawOutput, item.callId);
 
   return {
