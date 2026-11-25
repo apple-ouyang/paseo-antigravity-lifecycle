@@ -238,6 +238,7 @@ function buildCardData(
           boardSince: null,
           steps: null,
           targetMember: name && !countTag ? name : null,
+          model: model ?? null,
           canOpenConsole: true,
         };
       }
@@ -272,6 +273,7 @@ function buildCardData(
           boardSince: null,
           steps: null,
           targetMember: name && name !== "coordinator" ? name : null,
+          model: model ?? null,
           canOpenConsole: true,
         };
       }
@@ -377,6 +379,7 @@ function buildCardData(
         boardSince: null,
         steps: null,
         targetSubagentId,
+        model: model ?? null,
         canOpenConsole: true,
       };
     }

@@ -43,6 +43,49 @@ export type ConsoleNavTarget =
   | { kind: "member_by_name"; memberName: string }
   | { kind: "subagent_by_ref"; id?: string | null; role?: string | null };
 
+export function formatModelBadgeLabel(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower === "inherit" || lower === "default" || lower === "auto") return null;
+  return trimmed;
+}
+
+export function resolveMemberModelFromStatus(
+  status: AgentBgStatus | null,
+  memberName: string | null | undefined,
+  explicitModel?: string | null,
+): string | null {
+  const coordModel = formatModelBadgeLabel(status?.coordinator?.model);
+  const explicit = formatModelBadgeLabel(explicitModel);
+  const cleanName = memberName?.trim().replace(/^@/, "");
+  if (!cleanName) return explicit;
+  if (cleanName.toLowerCase() === "coordinator") {
+    return coordModel ?? explicit;
+  }
+  const member = status?.swarm?.members.find(
+    (m) => m.name.toLowerCase() === cleanName.toLowerCase(),
+  );
+  return formatModelBadgeLabel(member?.model) ?? explicit ?? coordModel;
+}
+
+export function resolveSubagentModelFromStatus(
+  status: AgentBgStatus | null,
+  ref: { id?: string | null; role?: string | null },
+  explicitModel?: string | null,
+): string | null {
+  const coordModel = formatModelBadgeLabel(status?.coordinator?.model);
+  const explicit = formatModelBadgeLabel(explicitModel);
+  const pool = [...(status?.teamwork?.nodes ?? []), ...(status?.subagents ?? [])];
+  const matched =
+    (ref.id ? pool.find((item) => item.id === ref.id) : undefined) ??
+    (ref.role
+      ? pool.find((item) => item.role.toLowerCase() === ref.role!.trim().toLowerCase())
+      : undefined);
+  return formatModelBadgeLabel(matched?.model) ?? explicit ?? coordModel;
+}
+
 export function resolveCoordinatorChildFromStatus(
   status: AgentBgStatus | null,
 ): SelectedChildTarget | null {

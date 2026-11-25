@@ -5,6 +5,7 @@ import {
   clearAllStatuses,
   consumeConsoleNavRequest,
   formatLocalTimestamp,
+  formatModelBadgeLabel,
   getChildTranscriptCache,
   getConsoleNavRequest,
   getStatusSnapshot,
@@ -14,7 +15,9 @@ import {
   replaceAllStatuses,
   resolveCoordinatorChildFromStatus,
   resolveMemberChildFromStatus,
+  resolveMemberModelFromStatus,
   resolveSubagentChildFromStatus,
+  resolveSubagentModelFromStatus,
   sendSwarmMessage,
   setOpenConsoleHandler,
   setRefreshAgentStatusHandler,
@@ -338,4 +341,74 @@ test("resolveCoordinatorChildFromStatus and sendSwarmMessage target @coordinator
   } finally {
     setSendSwarmMessageHandler(null);
   }
+});
+
+test("resolveMemberModelFromStatus and resolveSubagentModelFromStatus resolve explicit, live, and inherited models", () => {
+  assert.equal(formatModelBadgeLabel("inherit"), null);
+  assert.equal(formatModelBadgeLabel("default"), null);
+  assert.equal(formatModelBadgeLabel(" claude-opus-5-5-high "), "claude-opus-5-5-high");
+
+  const status = {
+    agentId: "a-models",
+    sessionId: "coord-1",
+    backgroundActive: true,
+    goalActive: false,
+    coordinatorState: "swarm_wait" as const,
+    coordinator: {
+      conversationId: "coord-1",
+      model: "gemini-4-neon-high",
+      lastActivity: null,
+      stepCount: 20,
+    },
+    pillLabel: "Swarm",
+    summaryLine: "Swarm",
+    swarm: {
+      title: "Model Test",
+      working: 2,
+      waiting: 0,
+      completed: 0,
+      members: [
+        {
+          name: "auditor-carbon",
+          conversationId: "w-1",
+          model: "gemini-4-carbon-high",
+          state: "working" as const,
+          updatedAt: null,
+        },
+        {
+          name: "ref-qm-cm",
+          conversationId: "w-2",
+          model: null,
+          state: "working" as const,
+          updatedAt: null,
+        },
+      ],
+    },
+    subagents: [
+      {
+        id: "sub-1",
+        role: "Verifier",
+        typeName: "research",
+        model: "claude-opus-5-5-high",
+        state: "running" as const,
+        updatedAt: null,
+      },
+    ],
+    tasks: [],
+    observedAt: Date.now(),
+  };
+
+  assert.equal(resolveMemberModelFromStatus(status, "coordinator"), "gemini-4-neon-high");
+  // Live model in members.json overrides earlier explicit model (e.g. after swarm model switch)
+  assert.equal(
+    resolveMemberModelFromStatus(status, "auditor-carbon", "gemini-4-neon-high"),
+    "gemini-4-carbon-high",
+  );
+  // Worker with omitted/inherit model falls back to coordinator's actual model
+  assert.equal(resolveMemberModelFromStatus(status, "ref-qm-cm", "inherit"), "gemini-4-neon-high");
+  assert.equal(resolveMemberModelFromStatus(status, "ref-qm-cm"), "gemini-4-neon-high");
+  // Subagent lookup by id and role
+  assert.equal(resolveSubagentModelFromStatus(status, { id: "sub-1" }), "claude-opus-5-5-high");
+  assert.equal(resolveSubagentModelFromStatus(status, { role: "Verifier" }), "claude-opus-5-5-high");
+  assert.equal(resolveSubagentModelFromStatus(status, { role: "Unknown" }, "inherit"), "gemini-4-neon-high");
 });

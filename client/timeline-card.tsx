@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { usePaseo, useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
@@ -8,12 +8,16 @@ import { RichMarkdown } from "./markdown.tsx";
 import { clipMarkdownPreview } from "./markdown-normalize.ts";
 import {
   formatLocalTimestamp,
+  formatModelBadgeLabel,
   getStatusSnapshot,
   getSubmittedQuestionAnswer,
   openConsoleForAgent,
   resolveMemberChildFromStatus,
+  resolveMemberModelFromStatus,
   resolveSubagentChildFromStatus,
+  resolveSubagentModelFromStatus,
   setSubmittedQuestionAnswer,
+  subscribeStatus,
 } from "./store.ts";
 
 const RECOMMENDED_RE = /^\s*(?:\(Recommended\)|（推荐）|\[Recommended\])\s*/i;
@@ -486,6 +490,30 @@ export function AgyToolCard({
 }: PluginTimelineItemProps<AgyToolCardData>) {
   const data = item.data;
   const timeLabel = formatLocalTimestamp(timestamp);
+  const liveStatus = useSyncExternalStore(
+    subscribeStatus,
+    () => getStatusSnapshot(agentId),
+    () => getStatusSnapshot(agentId),
+  );
+  const resolvedModel = useMemo(() => {
+    if (data.targetMember) {
+      return resolveMemberModelFromStatus(liveStatus, data.targetMember, data.model);
+    }
+    if (data.category === "subagent_invoke" || data.category === "subagent_message") {
+      return resolveSubagentModelFromStatus(
+        liveStatus,
+        {
+          id: data.targetSubagentId ?? null,
+          role: data.category === "subagent_invoke" ? data.headline : null,
+        },
+        data.model,
+      );
+    }
+    if (data.category === "swarm_action" && data.badge === "Swarm 派人") {
+      return formatModelBadgeLabel(data.model) ?? formatModelBadgeLabel(liveStatus?.coordinator?.model);
+    }
+    return formatModelBadgeLabel(data.model);
+  }, [liveStatus, data]);
   const [expanded, setExpanded] = useState(false);
   const [boardPosts, setBoardPosts] = useState<SwarmBoardPost[] | null>(null);
   const [boardLoading, setBoardLoading] = useState(false);
@@ -691,6 +719,30 @@ export function AgyToolCard({
           >
             {data.headline}
           </Text>
+          {resolvedModel ? (
+            <View
+              style={{
+                backgroundColor: theme.colors.surface2,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                borderRadius: 4,
+                paddingHorizontal: 5,
+                paddingVertical: 1,
+                maxWidth: 190,
+              }}
+            >
+              <Text
+                style={{
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 10,
+                  fontFamily: "monospace",
+                }}
+                numberOfLines={1}
+              >
+                {resolvedModel}
+              </Text>
+            </View>
+          ) : null}
           {data.status === "running" ? (
             <Text style={{ color: theme.colors.accent, fontSize: 11 }}>运行中…</Text>
           ) : data.status === "failed" ? (
@@ -746,29 +798,46 @@ export function AgyToolCard({
               </Text>
             ) : boardPosts && boardPosts.length > 0 ? (
               <View style={{ gap: 6 }}>
-                {boardPosts.map((post) => (
-                  <View
-                    key={post.seq}
-                    style={{
-                      backgroundColor: theme.colors.surface2,
-                      borderRadius: 6,
-                      padding: 7,
-                      gap: 3,
-                    }}
-                  >
-                    <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
-                      <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
-                        #{post.seq} {post.agent}
-                      </Text>
-                      {post.time ? (
-                        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
-                          {formatLocalTimestamp(post.time)}
-                        </Text>
-                      ) : null}
+                {boardPosts.map((post) => {
+                  const postModel = resolveMemberModelFromStatus(liveStatus, post.agent);
+                  return (
+                    <View
+                      key={post.seq}
+                      style={{
+                        backgroundColor: theme.colors.surface2,
+                        borderRadius: 6,
+                        padding: 7,
+                        gap: 3,
+                      }}
+                    >
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
+                          <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "600" }}>
+                            #{post.seq} {post.agent}
+                          </Text>
+                          {postModel ? (
+                            <Text
+                              style={{
+                                color: theme.colors.foregroundMuted,
+                                fontSize: 10,
+                                fontFamily: "monospace",
+                              }}
+                              numberOfLines={1}
+                            >
+                              {postModel}
+                            </Text>
+                          ) : null}
+                        </View>
+                        {post.time ? (
+                          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+                            {formatLocalTimestamp(post.time)}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <RichMarkdown text={clipMarkdownPreview(post.text, 600)} theme={theme} />
                     </View>
-                    <RichMarkdown text={clipMarkdownPreview(post.text, 600)} theme={theme} />
-                  </View>
-                ))}
+                  );
+                })}
               </View>
             ) : (
               <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>

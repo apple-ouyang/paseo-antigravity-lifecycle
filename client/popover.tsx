@@ -13,10 +13,12 @@ import { formatDurationShort, ProgressMeter } from "./progress-bar.tsx";
 import {
   fetchConsoleSnapshot,
   formatLocalTimestamp,
+  formatModelBadgeLabel,
   getStatusSnapshot,
   openConsoleForAgent,
   refreshAgentStatus,
   resolveCoordinatorChildFromStatus,
+  resolveMemberModelFromStatus,
   sendSwarmMessage,
   subscribeStatus,
   type SelectedChildTarget,
@@ -268,6 +270,30 @@ function StatusContent({
                       协调者
                     </Text>
                   </View>
+                  {formatModelBadgeLabel(status.coordinator?.model) ? (
+                    <View
+                      style={{
+                        backgroundColor: theme.colors.surface2,
+                        borderColor: theme.colors.border,
+                        borderWidth: 1,
+                        borderRadius: 4,
+                        paddingHorizontal: 5,
+                        paddingVertical: 1,
+                        maxWidth: 165,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color: theme.colors.foregroundMuted,
+                          fontSize: 9,
+                          fontFamily: "monospace",
+                        }}
+                        numberOfLines={1}
+                      >
+                        {formatModelBadgeLabel(status.coordinator?.model)}
+                      </Text>
+                    </View>
+                  ) : null}
                   {pendingInboxCount > 0 ? (
                     <View
                       style={{
@@ -352,11 +378,14 @@ function StatusContent({
                     <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
                       当前活跃成员（{liveMembers.length}）
                     </Text>
-                    {liveMembers.slice(0, 4).map((m) => (
-                      <Text key={`dg-${m.name}`} style={{ color: theme.colors.foreground, fontSize: 10 }} numberOfLines={1}>
-                        • @{m.name}（{m.state === "working" ? "运行中" : "待命"}）：{m.lastActivity ?? "处理中"}
-                      </Text>
-                    ))}
+                    {liveMembers.slice(0, 4).map((m) => {
+                      const mModel = resolveMemberModelFromStatus(status, m.name);
+                      return (
+                        <Text key={`dg-${m.name}`} style={{ color: theme.colors.foreground, fontSize: 10 }} numberOfLines={1}>
+                          • @{m.name}{mModel ? ` [${mModel}]` : ""}（{m.state === "working" ? "运行中" : "待命"}）：{m.lastActivity ?? "处理中"}
+                        </Text>
+                      );
+                    })}
                   </View>
                 ) : null}
                 {digestLoading ? (
@@ -605,12 +634,13 @@ function StatusContent({
               shownMembers.map((member) => {
                 const badge = stateLabelAndColor(member.state, member.delivered, theme);
                 const dur = formatDurationShort(member.durationMs);
+                const memberModel = resolveMemberModelFromStatus(status, member.name);
                 const handleMemberPress = () => {
                   if (member.conversationId) {
                     onOpenChild({
                       conversationId: member.conversationId,
                       label: `@${member.name}`,
-                      subtitle: member.model,
+                      subtitle: memberModel,
                       running: member.state === "working",
                       workspace: member.workspace ?? null,
                       memberName: member.name,
@@ -636,10 +666,34 @@ function StatusContent({
                     <View
                       style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}
                     >
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 5, flexShrink: 1, flexWrap: "wrap" }}>
                         <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }} numberOfLines={1}>
                           @{member.name}
                         </Text>
+                        {memberModel ? (
+                          <View
+                            style={{
+                              backgroundColor: theme.colors.surface2,
+                              borderColor: theme.colors.border,
+                              borderWidth: 1,
+                              borderRadius: 4,
+                              paddingHorizontal: 4,
+                              paddingVertical: 0.5,
+                              maxWidth: 165,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color: theme.colors.foregroundMuted,
+                                fontSize: 9,
+                                fontFamily: "monospace",
+                              }}
+                              numberOfLines={1}
+                            >
+                              {memberModel}
+                            </Text>
+                          </View>
+                        ) : null}
                         {member.stepProgress ? (
                           <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
                             {member.stepProgress.done}/{member.stepProgress.total}步
@@ -711,9 +765,23 @@ function StatusContent({
                       paddingVertical: 5,
                     }}
                   >
-                    <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
-                      {node.role}{dur ? ` (${dur})` : ""}
-                    </Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 5, flexShrink: 1, flexWrap: "wrap" }}>
+                      <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
+                        {node.role}{dur ? ` (${dur})` : ""}
+                      </Text>
+                      {formatModelBadgeLabel(node.model) ? (
+                        <Text
+                          style={{
+                            color: theme.colors.foregroundMuted,
+                            fontSize: 9,
+                            fontFamily: "monospace",
+                          }}
+                          numberOfLines={1}
+                        >
+                          {formatModelBadgeLabel(node.model)}
+                        </Text>
+                      ) : null}
+                    </View>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                       <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
                         {badge.label}
@@ -760,9 +828,23 @@ function StatusContent({
                     paddingVertical: 5,
                   }}
                 >
-                  <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
-                    {sub.role} ({sub.typeName})
-                  </Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 5, flexShrink: 1, flexWrap: "wrap" }}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 12, flexShrink: 1 }} numberOfLines={1}>
+                      {sub.role} ({sub.typeName})
+                    </Text>
+                    {formatModelBadgeLabel(sub.model) ? (
+                      <Text
+                        style={{
+                          color: theme.colors.foregroundMuted,
+                          fontSize: 9,
+                          fontFamily: "monospace",
+                        }}
+                        numberOfLines={1}
+                      >
+                        {formatModelBadgeLabel(sub.model)}
+                      </Text>
+                    ) : null}
+                  </View>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                     <Text style={{ color: badge.color, fontSize: 11, fontWeight: "600" }}>
                       {badge.label}

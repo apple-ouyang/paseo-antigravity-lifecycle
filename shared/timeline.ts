@@ -47,6 +47,7 @@ export const AgyToolCardSchema = z.object({
   questionAnswer: z.string().nullable().optional(),
   targetMember: z.string().nullable().optional(),
   targetSubagentId: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
   canOpenConsole: z.boolean(),
 });
 

@@ -37,6 +37,7 @@ import {
   applyChildTranscriptResponse,
   consumeConsoleNavRequest,
   formatLocalTimestamp,
+  formatModelBadgeLabel,
   getChildStepDetailCache,
   getChildTranscriptCache,
   getConsoleDetailCache,
@@ -44,6 +45,7 @@ import {
   getStatusSnapshot,
   resolveCoordinatorChildFromStatus,
   resolveMemberChildFromStatus,
+  resolveMemberModelFromStatus,
   resolveSubagentChildFromStatus,
   setChildStepDetailCache,
   setConsoleDetailCache,
@@ -320,11 +322,13 @@ function SectionCard({
 function MemberRow({
   member,
   taskDesc,
+  fallbackModel,
   theme,
   onOpen,
 }: {
   member: SwarmMember;
   taskDesc?: string;
+  fallbackModel?: string | null;
   theme: PluginTheme;
   onOpen: () => void;
 }) {
@@ -335,6 +339,7 @@ function MemberRow({
   const retired = isMemberDoneOrRetired(member);
   const cleanAct = member.lastActivity ? stripDonePrefix(member.lastActivity) : null;
   const dur = formatDurationShort(member.durationMs);
+  const modelLabel = formatModelBadgeLabel(member.model) ?? formatModelBadgeLabel(fallbackModel);
   return (
     <Pressable
       disabled={!member.conversationId}
@@ -351,10 +356,34 @@ function MemberRow({
       }}
     >
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1, flexWrap: "wrap" }}>
           <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }} numberOfLines={1}>
             @{member.name}
           </Text>
+          {modelLabel ? (
+            <View
+              style={{
+                backgroundColor: theme.colors.surface1,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                borderRadius: 4,
+                paddingHorizontal: 5,
+                paddingVertical: 1,
+                maxWidth: 190,
+              }}
+            >
+              <Text
+                style={{
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 10,
+                  fontFamily: "monospace",
+                }}
+                numberOfLines={1}
+              >
+                {modelLabel}
+              </Text>
+            </View>
+          ) : null}
           {member.stepProgress ? (
             <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "600" }}>
               {member.stepProgress.done}/{member.stepProgress.total}步
@@ -409,9 +438,11 @@ function MemberRow({
 
 function BoardPostRow({
   post,
+  model,
   theme,
 }: {
   post: SwarmBoardPost;
+  model?: string | null;
   theme: PluginTheme;
 }) {
   const [expanded, setExpanded] = useState(post.text.length <= 260);
@@ -437,6 +468,30 @@ function BoardPostRow({
             #{post.seq}
           </Text>
           <Text style={{ color: agentColor, fontSize: 12, fontWeight: "700" }}>{post.agent}</Text>
+          {model ? (
+            <View
+              style={{
+                backgroundColor: theme.colors.surface2,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                borderRadius: 4,
+                paddingHorizontal: 5,
+                paddingVertical: 1,
+                maxWidth: 180,
+              }}
+            >
+              <Text
+                style={{
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 10,
+                  fontFamily: "monospace",
+                }}
+                numberOfLines={1}
+              >
+                {model}
+              </Text>
+            </View>
+          ) : null}
           {post.mentions.map((m) => (
             <View
               key={m}
@@ -2297,6 +2352,30 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                         协调者
                       </Text>
                     </View>
+                    {formatModelBadgeLabel(status.coordinator?.model) ? (
+                      <View
+                        style={{
+                          backgroundColor: theme.colors.surface2,
+                          borderColor: theme.colors.border,
+                          borderWidth: 1,
+                          borderRadius: 4,
+                          paddingHorizontal: 5,
+                          paddingVertical: 1,
+                          maxWidth: 190,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color: theme.colors.foregroundMuted,
+                            fontSize: 10,
+                            fontFamily: "monospace",
+                          }}
+                          numberOfLines={1}
+                        >
+                          {formatModelBadgeLabel(status.coordinator?.model)}
+                        </Text>
+                      </View>
+                    ) : null}
                     <Text
                       style={{
                         color:
@@ -2556,6 +2635,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                   key={m.name + m.conversationId}
                   member={m}
                   taskDesc={swarmPlan?.tasks[m.name]}
+                  fallbackModel={status.coordinator?.model}
                   theme={theme}
                   onOpen={() => openMemberLog(m)}
                 />
@@ -2593,6 +2673,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                     key={m.name + m.conversationId}
                     member={m}
                     taskDesc={swarmPlan?.tasks[m.name]}
+                    fallbackModel={status.coordinator?.model}
                     theme={theme}
                     onOpen={() => openMemberLog(m)}
                   />
@@ -2631,6 +2712,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                         key={m.name + m.conversationId}
                         member={m}
                         taskDesc={swarmPlan?.tasks[m.name]}
+                        fallbackModel={status.coordinator?.model}
                         theme={theme}
                         onOpen={() => openMemberLog(m)}
                       />
@@ -2901,6 +2983,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                     key={m.name + m.conversationId}
                     member={m}
                     taskDesc={swarmPlan?.tasks[m.name]}
+                    fallbackModel={status.coordinator?.model}
                     theme={theme}
                     onOpen={() => openMemberLog(m)}
                   />
@@ -2915,6 +2998,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                     key={m.name + m.conversationId}
                     member={m}
                     taskDesc={swarmPlan?.tasks[m.name]}
+                    fallbackModel={status.coordinator?.model}
                     theme={theme}
                     onOpen={() => openMemberLog(m)}
                   />
@@ -2942,6 +3026,7 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                     key={m.name + m.conversationId}
                     member={m}
                     taskDesc={swarmPlan?.tasks[m.name]}
+                    fallbackModel={status.coordinator?.model}
                     theme={theme}
                     onOpen={() => openMemberLog(m)}
                   />
@@ -3044,7 +3129,14 @@ export function AgyConsolePanel(props: PluginAgentPanelProps) {
                 当前筛选条件下暂无消息板记录。
               </Text>
             ) : (
-              filteredPosts.map((post) => <BoardPostRow key={post.seq} post={post} theme={theme} />)
+              filteredPosts.map((post) => (
+                <BoardPostRow
+                  key={post.seq}
+                  post={post}
+                  model={resolveMemberModelFromStatus(status, post.agent)}
+                  theme={theme}
+                />
+              ))
             )}
           </ScrollView>
 
