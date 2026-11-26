@@ -195,7 +195,8 @@ process.stdin.on("end", () => {
     mkdirSync(logsDir, { recursive: true });
     const now = Date.now();
     const envPid = Number(process.env.PASEO_HOOK_AGENT_PID || "");
-    const pid = Number.isInteger(envPid) && envPid > 1 ? envPid : (typeof process.ppid === "number" && process.ppid > 1 ? process.ppid : null);
+    // On Windows the parent is the short-lived cmd.exe, not agy, so record no PID there.
+    const pid = Number.isInteger(envPid) && envPid > 1 ? envPid : (process.platform !== "win32" && typeof process.ppid === "number" && process.ppid > 1 ? process.ppid : null);
     const writeJsonAtomic = (filename, data, mode) => {
       const target = path.join(logsDir, filename);
       const tmp = \`\${target}.\${process.pid}.tmp\`;
@@ -244,7 +245,13 @@ export function buildHookCommand(
   scriptPath: string,
   event: "PreInvocation" | "PostInvocation" | "Stop",
   nodeBinPath: string,
+  platform: NodeJS.Platform = process.platform,
 ): string {
+  if (platform === "win32") {
+    // agy runs hook commands with `cmd /c` on Windows, so /bin/sh is not available.
+    const quote = (value: string) => (/[\s&|<>^()]/.test(value) ? `"${value}"` : value);
+    return `node ${quote(scriptPath)} ${event}`;
+  }
   const quotedScript = shellSingleQuote(scriptPath);
   const quotedNode = shellSingleQuote(nodeBinPath);
   const quotedEvent = shellSingleQuote(event);

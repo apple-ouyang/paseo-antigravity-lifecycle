@@ -1,7 +1,6 @@
 import { homedir } from "node:os";
 import path from "node:path";
-import type { PaseoApi, PaseoAgent } from "@getpaseo/client";
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
 import {
   clearTranscriptCache,
   collectAllowedChildIds,
@@ -25,6 +24,10 @@ import {
   agySwarmSendMessage,
   type AgentBgStatus,
 } from "./shared/rpc.ts";
+
+// Derived from the plugin SDK: managed installs have no @getpaseo/client to resolve.
+type PaseoApi = PluginHandlerContext["paseo"];
+type PaseoAgent = Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number]["agent"];
 
 const WATCH_POLL_MS = 2_000;
 const REFRESH_COOLDOWN_MS = 10_000;

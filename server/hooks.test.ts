@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { PASEO_BUNDLE_KEY, ensureAntigravityHooksInstalled } from "./hooks.ts";
+import { PASEO_BUNDLE_KEY, buildHookCommand, ensureAntigravityHooksInstalled } from "./hooks.ts";
 
 test("ensureAntigravityHooksInstalled preserves sibling bundles and writes hook-state.json across lifecycle events", () => {
   const root = mkdtempSync(path.join(tmpdir(), "paseo-agy-lifecycle-"));
@@ -156,4 +156,16 @@ test("ensureAntigravityHooksInstalled preserves sibling bundles and writes hook-
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("buildHookCommand emits a cmd-compatible command on Windows", () => {
+  assert.equal(
+    buildHookCommand("C:\\Users\\me\\.paseo\\agent-hooks\\antigravity-hook.mjs", "Stop", "unused", "win32"),
+    "node C:\\Users\\me\\.paseo\\agent-hooks\\antigravity-hook.mjs Stop",
+  );
+  assert.equal(
+    buildHookCommand("C:\\Users\\Jane Doe\\hook.mjs", "PreInvocation", "unused", "win32"),
+    'node "C:\\Users\\Jane Doe\\hook.mjs" PreInvocation',
+  );
+  assert.match(buildHookCommand("/home/me/hook.mjs", "Stop", "/usr/bin/node", "linux"), /^\/bin\/sh -c /);
 });
