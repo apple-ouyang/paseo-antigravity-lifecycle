@@ -1,9 +1,13 @@
-import type { PaseoAgent } from "@getpaseo/client";
 import type {
   PluginButtonRegistration,
   PluginClientContext,
   PluginSubscriptionHandle,
 } from "@getpaseo/plugin/client";
+
+// Derived from the plugin SDK: managed installs have no @getpaseo/client to resolve.
+type PaseoAgent = Awaited<
+  ReturnType<PluginClientContext["paseo"]["agents"]["list"]>
+>["entries"][number]["agent"];
 import { AgyConsolePanel } from "./client/console-panel.tsx";
 import { AgyLifecyclePopover } from "./client/popover.tsx";
 import {
